@@ -2,6 +2,7 @@ package com.example.ciudadactiva.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ciudadactiva.data.CiudadActivaRepository
 import com.example.ciudadactiva.network.ApiClient
 import com.example.ciudadactiva.network.models.ReporteCreateDTO
 import com.example.ciudadactiva.network.models.UbicacionDTO
@@ -33,9 +34,13 @@ class CreateReportViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.value = CreateReportState.Loading
             try {
-                // TODO: Reemplazar el "1L" por el ID real del usuario que inició sesión.
-                // Por ahora usamos 1L para que la API no falle por "ciudadanoId obligatorio"
-                val ciudadanoId = 1L 
+                // Usamos el ID del usuario que acaba de iniciar sesión
+                val ciudadanoId = CiudadActivaRepository.currentUserId
+                
+                if (ciudadanoId == null) {
+                    _uiState.value = CreateReportState.Error("Debes iniciar sesión primero.")
+                    return@launch
+                }
                 
                 val request = ReporteCreateDTO(
                     ciudadanoId = ciudadanoId,

@@ -123,6 +123,7 @@ data class StaffUserItem(
 // Las listas están vacías, esperando a ser llenadas por tu API en Render.
 object CiudadActivaRepository {
     var currentRole by mutableStateOf(UserRole.CIUDADANO)
+    var currentUserId by mutableStateOf<Long?>(null) // Guardaremos el ID del usuario aquí
     var currentUserName by mutableStateOf("")
     var currentUserEmail by mutableStateOf("")
     var currentUserPhone by mutableStateOf("")

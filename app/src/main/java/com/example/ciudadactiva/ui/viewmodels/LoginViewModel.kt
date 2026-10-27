@@ -2,6 +2,7 @@ package com.example.ciudadactiva.ui.viewmodels
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ciudadactiva.data.CiudadActivaRepository
 import com.example.ciudadactiva.network.ApiClient
 import com.example.ciudadactiva.network.models.LoginRequest
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,8 +31,13 @@ class LoginViewModel : ViewModel() {
                 val request = LoginRequest(email, pass)
                 val response = ApiClient.apiService.login(request)
                 
+                // Guardamos el ID del usuario y otros datos globalmente
+                CiudadActivaRepository.currentUserId = response.usuarioId
+                CiudadActivaRepository.currentUserName = response.nombreCompleto
+                CiudadActivaRepository.currentUserEmail = response.correo
+                
                 // Si es exitoso
-                _uiState.value = LoginState.Success(response.token, response.user.name)
+                _uiState.value = LoginState.Success(response.token, response.nombreCompleto)
             } catch (e: HttpException) {
                 // Errores que el servidor de Render nos responde (401, 404, 500...)
                 val userMsg = when (e.code()) {

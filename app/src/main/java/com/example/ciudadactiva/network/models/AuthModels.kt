@@ -9,7 +9,11 @@ data class LoginRequest(
 
 data class LoginResponse(
     val token: String,
-    val user: UserDto
+    val tipoToken: String,
+    val usuarioId: Long,
+    val nombreCompleto: String,
+    val correo: String,
+    val rol: String
 )
 
 data class UserDto(
