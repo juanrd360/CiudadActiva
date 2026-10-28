@@ -411,6 +411,7 @@ fun CitizenReportsScreen(navController: NavController) {
                                     .clickable {
                                         scope.launch {
                                             CiudadActivaRepository.refreshAllReportsForCurrentRole()
+                                            CiudadActivaRepository.refreshNotifications()
                                         }
                                     }
                                     .padding(vertical = 8.dp)
@@ -438,6 +439,7 @@ fun MyReportsScreen(navController: NavController) {
     LaunchedEffect(Unit) {
         if (CiudadActivaRepository.reports.none { it.isOwnReport }) isLoading = true
         CiudadActivaRepository.refreshAllReportsForCurrentRole()
+        CiudadActivaRepository.refreshNotifications()
         isLoading = false
     }
 
@@ -578,22 +580,40 @@ fun MyReportsScreen(navController: NavController) {
                                 }
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
-                                Text(
-                                    text = "${report.category} · ${report.code} · 27 oct",
-                                    style = Texto12Semibold.copy(color = CaPrimaryText)
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = report.location,
-                                    style = Texto12Regular.copy(color = CaMuted)
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = report.title,
-                                    style = Titulo16
-                                )
+                                Row(verticalAlignment = Alignment.Top) {
+                                    CaReportThumbnail(
+                                        size = 64.dp,
+                                        imageUri = report.imageUris.firstOrNull()
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "${report.category} · ${report.code} · ${report.createdAt}",
+                                            style = Texto12Semibold.copy(color = CaPrimaryText)
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = report.location,
+                                            style = Texto12Regular.copy(color = CaMuted)
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = report.title,
+                                            style = Titulo16
+                                        )
+                                    }
+                                }
                                 Spacer(modifier = Modifier.height(10.dp))
-                                CaStatusChip(report.status)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CaStatusChip(report.status)
+                                    if (report.hasUnreadUpdate) {
+                                        CaActualizadoIndicator()
+                                    }
+                                }
 
                                 if (report.status == ReportStatus.REGISTRADO) {
                                     Spacer(modifier = Modifier.height(12.dp))
@@ -687,8 +707,11 @@ fun CreateOrEditReportScreen(
     var visibility by remember {
         mutableStateOf("Solo tú y el equipo de gestión, hasta su validación")
     }
-    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
-    var hasPhoto by remember { mutableStateOf(false) }
+    val selectedImageUris = remember {
+        mutableStateListOf<Uri>().apply {
+            existingReport?.imageUris?.let { addAll(it) }
+        }
+    }
     var showEvidenceSheet by remember { mutableStateOf(false) }
 
     // Camera & Gallery Launchers
@@ -705,8 +728,12 @@ fun CreateOrEditReportScreen(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
         if (success) {
-            selectedImageUri = cameraFileUri
-            hasPhoto = true
+            val savedUri = CiudadActivaRepository.copyUriToInternalStorage(context, cameraFileUri)
+            if (selectedImageUris.size < 3) {
+                selectedImageUris.add(savedUri)
+            } else {
+                selectedImageUris[selectedImageUris.lastIndex] = savedUri
+            }
         }
     }
 
@@ -714,8 +741,12 @@ fun CreateOrEditReportScreen(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            selectedImageUri = uri
-            hasPhoto = true
+            val savedUri = CiudadActivaRepository.copyUriToInternalStorage(context, uri)
+            if (selectedImageUris.size < 3) {
+                selectedImageUris.add(savedUri)
+            } else {
+                selectedImageUris[selectedImageUris.lastIndex] = savedUri
+            }
         }
     }
 
@@ -936,48 +967,44 @@ fun CreateOrEditReportScreen(
             Spacer(modifier = Modifier.height(14.dp))
 
             Text(
-                text = "Evidencia",
+                text = if (selectedImageUris.isEmpty()) "Evidencia" else "Evidencia · ${selectedImageUris.size} foto(s)",
                 style = Texto12Semibold.copy(color = CaMuted)
             )
             Spacer(modifier = Modifier.height(8.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                if (hasPhoto) {
-                    CaReportThumbnail(
-                        size = 96.dp,
-                        isRealPhotoStyle = true,
-                        imageUri = selectedImageUri,
-                        onRemove = {
-                            hasPhoto = false
-                            selectedImageUri = null
-                        }
-                    )
-                }
-                Column(
-                    modifier = Modifier.weight(1f),
-                    horizontalAlignment = Alignment.CenterHorizontally
+            if (selectedImageUris.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    CaButton(
-                        text = if (hasPhoto) "Cambiar foto" else "Adjuntar foto",
-                        onClick = { showEvidenceSheet = true },
-                        type = CaButtonType.SECUNDARIO
-                    )
-                    if (hasPhoto) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Quitar foto",
-                            style = Texto14Semibold.copy(color = CaPrimaryText),
-                            modifier = Modifier.clickable {
-                                hasPhoto = false
-                                selectedImageUri = null
+                    selectedImageUris.forEachIndexed { index, uri ->
+                        CaReportThumbnail(
+                            size = 96.dp,
+                            isRealPhotoStyle = true,
+                            imageUri = uri,
+                            onRemove = {
+                                selectedImageUris.removeAt(index)
                             }
                         )
                     }
                 }
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
+            if (selectedImageUris.size < 3) {
+                CaButton(
+                    text = if (selectedImageUris.isEmpty()) "Adjuntar foto" else "Agregar otra foto (${selectedImageUris.size}/3)",
+                    onClick = { showEvidenceSheet = true },
+                    type = CaButtonType.SECUNDARIO
+                )
+            } else {
+                CaButton(
+                    text = "Reemplazar última foto",
+                    onClick = { showEvidenceSheet = true },
+                    type = CaButtonType.SECUNDARIO
+                )
             }
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -1035,6 +1062,11 @@ fun CreateOrEditReportScreen(
                         existingReport.location = location
                         existingReport.latitude = latitude
                         existingReport.longitude = longitude
+                        CiudadActivaRepository.saveReportImages(
+                            reportId = existingReport.id,
+                            reportCode = existingReport.code,
+                            uris = selectedImageUris.toList()
+                        )
                         val repLongId = existingReport.id.toLongOrNull()
                         if (repLongId != null) {
                             viewModel.updateReport(
@@ -1043,7 +1075,8 @@ fun CreateOrEditReportScreen(
                                 descripcion = description,
                                 latitud = latitude,
                                 longitud = longitude,
-                                direccion = location
+                                direccion = location,
+                                imageUris = selectedImageUris.toList()
                             )
                         } else {
                             navController.popBackStack()
@@ -1051,10 +1084,12 @@ fun CreateOrEditReportScreen(
                     } else if (isFormValid) {
                         viewModel.createReport(
                             categoriaId = categoryId,
+                            titulo = title.ifBlank { null },
                             descripcion = description,
                             latitud = latitude,
                             longitud = longitude,
-                            direccion = location
+                            direccion = location,
+                            imageUris = selectedImageUris.toList()
                         )
                     }
                 },
@@ -1145,8 +1180,8 @@ fun NotificationsScreen(navController: NavController) {
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    item.isUnread = false
-                                    val numId = item.id.toLongOrNull()
+                                    CiudadActivaRepository.markNotificationAsRead(item.id, item.reportCode)
+                                    val numId = item.id.removePrefix("srv_").toLongOrNull()
                                     if (numId != null) {
                                         scope.launch {
                                             try {

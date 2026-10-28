@@ -401,6 +401,20 @@ fun LoginScreen(
                 enabled = !isLoading
             )
 
+            Spacer(modifier = Modifier.height(12.dp))
+
+            CaButton(
+                text = "Iniciar sesión como Gestor",
+                onClick = {
+                    email = "gestor.panel@ciudadactiva.com"
+                    password = "gestor123"
+                    viewModel.login("gestor.panel@ciudadactiva.com", "gestor123")
+                },
+                type = CaButtonType.ACCION,
+                enabled = !isLoading,
+                isLoading = isLoading
+            )
+
             Spacer(modifier = Modifier.height(18.dp))
 
             Box(

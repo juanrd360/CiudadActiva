@@ -685,7 +685,10 @@ fun CaReportCard(
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.Top) {
-                CaReportThumbnail(size = 72.dp)
+                CaReportThumbnail(
+                    size = 72.dp,
+                    imageUri = report.imageUris.firstOrNull()
+                )
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(

@@ -1,11 +1,28 @@
 package com.example.ciudadactiva.data
 
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import com.example.ciudadactiva.MainActivity
+import com.example.ciudadactiva.R
 import com.example.ciudadactiva.network.ApiClient
 import com.example.ciudadactiva.network.models.*
+import java.io.File
+import java.io.FileOutputStream
 
 enum class UserRole(val label: String, val permissionsSummary: String) {
     CIUDADANO("Ciudadano", "Reportar y hacer seguimiento"),
@@ -89,6 +106,7 @@ data class ReportItem(
     var citizenConfirmationComment: String? = null,
     val timeline: MutableList<TimelineEvent> = mutableListOf(),
     val comments: MutableList<ReportComment> = mutableListOf(),
+    val imageUris: MutableList<Uri> = mutableListOf(),
     var categoryId: Int = 1,
     var latitude: Double = 4.6097,
     var longitude: Double = -74.0817
@@ -146,6 +164,175 @@ object CiudadActivaRepository {
     val notifications = mutableStateListOf<NotificationItem>()
     val reports = mutableStateListOf<ReportItem>()
 
+    private const val PREFS_NAME = "ciudad_activa_prefs"
+    private const val CHANNEL_ID = "ciudad_activa_updates"
+    private var appContext: Context? = null
+    private var prefs: SharedPreferences? = null
+
+    private val reportImagesMemory = mutableMapOf<String, List<Uri>>()
+    private val readNotificationIds = mutableSetOf<String>()
+    private val systemNotifiedIds = mutableSetOf<String>()
+
+    fun init(context: Context) {
+        val ctx = context.applicationContext
+        appContext = ctx
+        val sp = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs = sp
+        sp.getStringSet("read_notif_ids", emptySet())?.let { readNotificationIds.addAll(it) }
+        sp.getStringSet("sys_notif_ids", emptySet())?.let { systemNotifiedIds.addAll(it) }
+        createNotificationChannel(ctx)
+    }
+
+    private fun createNotificationChannel(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Actualizaciones de Reportes",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Avisos cuando tus reportes o los que sigues cambian de estado"
+            }
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            manager?.createNotificationChannel(channel)
+        }
+    }
+
+    fun copyUriToInternalStorage(context: Context, sourceUri: Uri): Uri {
+        return try {
+            val dir = File(context.filesDir, "report_photos").apply { mkdirs() }
+            val destFile = File(dir, "photo_${System.currentTimeMillis()}_${(100..999).random()}.jpg")
+            context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            if (destFile.exists() && destFile.length() > 0L) {
+                Uri.fromFile(destFile)
+            } else {
+                sourceUri
+            }
+        } catch (_: Exception) {
+            sourceUri
+        }
+    }
+
+    fun saveReportImages(reportId: String, reportCode: String?, uris: List<Uri>) {
+        reportImagesMemory[reportId] = uris
+        if (!reportCode.isNullOrBlank()) {
+            reportImagesMemory[reportCode] = uris
+        }
+        val serialized = uris.joinToString("|") { it.toString() }
+        prefs?.edit()?.apply {
+            putString("img_$reportId", serialized)
+            if (!reportCode.isNullOrBlank()) {
+                putString("img_$reportCode", serialized)
+            }
+            apply()
+        }
+        reports.find { it.id == reportId || (!reportCode.isNullOrBlank() && it.code == reportCode) }?.let { rep ->
+            rep.imageUris.clear()
+            rep.imageUris.addAll(uris)
+        }
+    }
+
+    fun getSavedReportImages(reportId: String, reportCode: String?): List<Uri> {
+        reportImagesMemory[reportId]?.takeIf { it.isNotEmpty() }?.let { return it }
+        if (!reportCode.isNullOrBlank()) {
+            reportImagesMemory[reportCode]?.takeIf { it.isNotEmpty() }?.let { return it }
+        }
+        val sp = prefs ?: return emptyList()
+        val raw = sp.getString("img_$reportId", null)
+            ?: (if (!reportCode.isNullOrBlank()) sp.getString("img_$reportCode", null) else null)
+            ?: return emptyList()
+        if (raw.isBlank()) return emptyList()
+        val parsed = raw.split("|").mapNotNull { str ->
+            if (str.isBlank()) null else Uri.parse(str)
+        }
+        reportImagesMemory[reportId] = parsed
+        if (!reportCode.isNullOrBlank()) {
+            reportImagesMemory[reportCode] = parsed
+        }
+        return parsed
+    }
+
+    fun setReportFollowed(reportId: String, reportCode: String?, followed: Boolean) {
+        val uidKey = "followed_${currentUserId ?: "guest"}"
+        val sp = prefs
+        val currentSet = sp?.getStringSet(uidKey, emptySet())?.toMutableSet() ?: mutableSetOf()
+        if (followed) {
+            currentSet.add(reportId)
+            if (!reportCode.isNullOrBlank()) currentSet.add(reportCode)
+        } else {
+            currentSet.remove(reportId)
+            if (!reportCode.isNullOrBlank()) currentSet.remove(reportCode)
+        }
+        sp?.edit()?.putStringSet(uidKey, currentSet)?.apply()
+        reports.find { it.id == reportId || (!reportCode.isNullOrBlank() && it.code == reportCode) }?.let {
+            it.isFollowing = followed
+        }
+    }
+
+    fun isReportFollowedLocally(reportId: String, reportCode: String?): Boolean {
+        val uidKey = "followed_${currentUserId ?: "guest"}"
+        val set = prefs?.getStringSet(uidKey, emptySet()) ?: emptySet()
+        return set.contains(reportId) || (!reportCode.isNullOrBlank() && set.contains(reportCode))
+    }
+
+    fun markNotificationAsRead(notifId: String, reportIdOrCode: String? = null) {
+        readNotificationIds.add(notifId)
+        prefs?.edit()?.putStringSet("read_notif_ids", readNotificationIds.toSet())?.apply()
+        notifications.find { it.id == notifId }?.isUnread = false
+        if (reportIdOrCode != null) {
+            val rep = getReportById(reportIdOrCode)
+            if (rep != null) {
+                rep.hasUnreadUpdate = notifications.any {
+                    (it.reportCode == rep.id || it.reportCode == rep.code) && it.isUnread
+                }
+            }
+        }
+    }
+
+    private fun triggerSystemNotificationIfNeeded(item: NotificationItem) {
+        if (!item.isUnread || systemNotifiedIds.contains(item.id)) return
+        val ctx = appContext ?: return
+        systemNotifiedIds.add(item.id)
+        prefs?.edit()?.putStringSet("sys_notif_ids", systemNotifiedIds.toSet())?.apply()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+        }
+
+        try {
+            val intent = Intent(ctx, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                ctx,
+                item.id.hashCode(),
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val notification = NotificationCompat.Builder(ctx, CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(item.title)
+                .setContentText(item.subtitle)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(item.subtitle))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
+            NotificationManagerCompat.from(ctx).notify(item.id.hashCode(), notification)
+        } catch (_: Exception) {
+        }
+    }
+
     fun getReportById(id: String): ReportItem? {
         return reports.find { it.id == id || it.code == id }
     }
@@ -190,9 +377,19 @@ object CiudadActivaRepository {
         val finalLat = if (validColombiaCoords) rawLat!! else 4.6351 + ((dto.id % 5) * 0.0042)
         val finalLon = if (validColombiaCoords) rawLon!! else -74.0703 - ((dto.id % 4) * 0.0038)
 
+        val reportIdStr = dto.id.toString()
+        val reportCodeStr = dto.codigo ?: "CA-${dto.id}"
+        val savedImages = getSavedReportImages(reportIdStr, reportCodeStr)
+        val finalImages = when {
+            savedImages.isNotEmpty() -> savedImages.toMutableList()
+            existing != null && existing.imageUris.isNotEmpty() -> existing.imageUris.toMutableList()
+            else -> mutableListOf()
+        }
+        val followedLocally = isReportFollowedLocally(reportIdStr, reportCodeStr)
+
         return ReportItem(
-            id = dto.id.toString(),
-            code = dto.codigo ?: "CA-${dto.id}",
+            id = reportIdStr,
+            code = reportCodeStr,
             authorName = dto.ciudadano?.fullName ?: "Ciudadano",
             isOwnReport = isOwn,
             category = dto.categoria?.nombre ?: "General",
@@ -209,7 +406,7 @@ object CiudadActivaRepository {
             dueInText = existing?.dueInText,
             supportCount = existing?.supportCount ?: 0,
             hasSupported = existing?.hasSupported ?: false,
-            isFollowing = isFollowed || (existing?.isFollowing ?: false),
+            isFollowing = isFollowed || followedLocally || (existing?.isFollowing ?: false),
             assignedOperator = existing?.assignedOperator,
             rejectionReason = dto.motivoRechazo,
             reopenReason = existing?.reopenReason,
@@ -220,6 +417,7 @@ object CiudadActivaRepository {
             citizenConfirmationComment = existing?.citizenConfirmationComment,
             timeline = existing?.timeline ?: mutableListOf(),
             comments = existing?.comments ?: mutableListOf(),
+            imageUris = finalImages,
             categoryId = dto.categoria?.id ?: 1,
             latitude = finalLat,
             longitude = finalLon
@@ -347,22 +545,107 @@ object CiudadActivaRepository {
 
     suspend fun refreshNotifications() {
         val uid = currentUserId ?: return
+        val collected = mutableListOf<NotificationItem>()
+
+        // 1. Asegurar que mis reportes y seguidos estén sincronizados
+        try {
+            val mine = ApiClient.apiService.getMyReports(uid)
+            upsertReports(mine.content)
+        } catch (_: Exception) {}
+
+        try {
+            val followed = ApiClient.apiService.getFollowedReports(uid)
+            upsertReports(followed.content, markFollowed = true)
+        } catch (_: Exception) {}
+
+        // 2. Intentar endpoint directo de notificaciones
         try {
             val page = ApiClient.apiService.getNotifications(uid)
-            notifications.clear()
             page.content.forEach { n ->
-                notifications.add(
+                val notifId = "srv_${n.id}"
+                val isUnread = !n.leida && !readNotificationIds.contains(notifId)
+                collected.add(
                     NotificationItem(
-                        id = n.id.toString(),
+                        id = notifId,
                         reportCode = n.reporte?.id?.toString() ?: n.reporte?.codigo ?: "1",
                         title = n.reporte?.codigo ?: "Aviso del sistema",
                         subtitle = n.mensaje ?: "Actualización en reporte",
                         timestamp = formatIsoDate(n.fecha),
-                        isUnread = !n.leida
+                        isUnread = isUnread
                     )
                 )
             }
         } catch (_: Exception) {
+        }
+
+        // 3. Respaldo y sincronización en tiempo real desde el historial (/api/reportes/{id}/historial)
+        // para todos los reportes propios (isOwnReport) y los reportes seguidos (isFollowing)
+        val trackedReports = reports.filter { it.isOwnReport || it.isFollowing }
+        trackedReports.forEach { rep ->
+            val repLongId = rep.id.toLongOrNull()
+            var addedFromHistory = false
+            if (repLongId != null) {
+                try {
+                    val history = ApiClient.apiService.getReportTimeline(repLongId)
+                    history.sortedByDescending { it.id }.forEach { seg ->
+                        val accion = seg.tipoAccion?.uppercase() ?: ""
+                        if (accion != "CREACION") {
+                            addedFromHistory = true
+                            val notifId = "seg_${seg.id}"
+                            val newStateLabel = parseStatus(seg.estadoNuevo).label
+                            val prefix = if (rep.isOwnReport) "Tu reporte ${rep.code}" else "Reporte seguido ${rep.code}"
+                            val titleText = "$prefix · $newStateLabel"
+                            val obs = seg.observacion?.takeIf { it.isNotBlank() }
+                                ?: "El reporte cambió a estado $newStateLabel."
+                            val subtitleText = "${rep.title}: $obs"
+                            val isUnread = !readNotificationIds.contains(notifId)
+                            if (collected.none { it.id == notifId }) {
+                                collected.add(
+                                    NotificationItem(
+                                        id = notifId,
+                                        reportCode = rep.id,
+                                        title = titleText,
+                                        subtitle = subtitleText,
+                                        timestamp = formatIsoDate(seg.fechaRegistro),
+                                        isUnread = isUnread
+                                    )
+                                )
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+
+            if (!addedFromHistory && rep.status != ReportStatus.REGISTRADO) {
+                val notifId = "st_${rep.id}_${rep.status.name}"
+                val prefix = if (rep.isOwnReport) "Tu reporte ${rep.code}" else "Reporte seguido ${rep.code}"
+                val isUnread = !readNotificationIds.contains(notifId)
+                if (collected.none { it.id == notifId }) {
+                    collected.add(
+                        NotificationItem(
+                            id = notifId,
+                            reportCode = rep.id,
+                            title = "$prefix · ${rep.status.label}",
+                            subtitle = "${rep.title} se encuentra en estado ${rep.status.label}.",
+                            timestamp = rep.createdAt,
+                            isUnread = isUnread
+                        )
+                    )
+                }
+            }
+
+            rep.hasUnreadUpdate = collected.any {
+                (it.reportCode == rep.id || it.reportCode == rep.code) && it.isUnread
+            }
+        }
+
+        notifications.clear()
+        notifications.addAll(collected)
+
+        // Disparar notificación del sistema Android para avisos nuevos no leídos
+        collected.filter { it.isUnread }.forEach { item ->
+            triggerSystemNotificationIfNeeded(item)
         }
     }
 

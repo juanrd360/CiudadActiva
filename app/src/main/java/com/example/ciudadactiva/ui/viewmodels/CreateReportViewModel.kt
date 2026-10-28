@@ -1,5 +1,6 @@
 package com.example.ciudadactiva.ui.viewmodels
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ciudadactiva.data.CiudadActivaRepository
@@ -27,11 +28,13 @@ class CreateReportViewModel : ViewModel() {
 
     fun createReport(
         categoriaId: Int,
+        titulo: String? = null,
         descripcion: String,
         latitud: Double,
         longitud: Double,
         direccion: String?,
-        origen: String = "GPS"
+        origen: String = "GPS",
+        imageUris: List<Uri> = emptyList()
     ) {
         viewModelScope.launch {
             _uiState.value = CreateReportState.Loading
@@ -60,7 +63,17 @@ class CreateReportViewModel : ViewModel() {
                 )
 
                 val created = ApiClient.apiService.createReport(request)
+                if (imageUris.isNotEmpty()) {
+                    CiudadActivaRepository.saveReportImages(
+                        reportId = created.id.toString(),
+                        reportCode = created.codigo,
+                        uris = imageUris
+                    )
+                }
                 CiudadActivaRepository.upsertReports(listOf(created))
+                if (!titulo.isNullOrBlank()) {
+                    CiudadActivaRepository.getReportById(created.id.toString())?.title = titulo.trim()
+                }
 
                 _uiState.value = CreateReportState.Success
             } catch (e: HttpException) {
@@ -91,7 +104,8 @@ class CreateReportViewModel : ViewModel() {
         descripcion: String,
         latitud: Double,
         longitud: Double,
-        direccion: String?
+        direccion: String?,
+        imageUris: List<Uri> = emptyList()
     ) {
         viewModelScope.launch {
             _uiState.value = CreateReportState.Loading
@@ -113,6 +127,11 @@ class CreateReportViewModel : ViewModel() {
                     )
                 )
                 val updated = ApiClient.apiService.updateOwnReport(reportId, ciudadanoId, request)
+                CiudadActivaRepository.saveReportImages(
+                    reportId = updated.id.toString(),
+                    reportCode = updated.codigo,
+                    uris = imageUris
+                )
                 CiudadActivaRepository.upsertReports(listOf(updated))
                 _uiState.value = CreateReportState.Success
             } catch (e: HttpException) {

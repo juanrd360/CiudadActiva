@@ -1,5 +1,9 @@
 package com.example.ciudadactiva.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,6 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.example.ciudadactiva.data.*
@@ -36,6 +41,7 @@ fun ReportDetailScreen(
     navController: NavController,
     reportId: String = "rep-0012"
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val report = remember(reportId, CiudadActivaRepository.reports.size) {
         CiudadActivaRepository.getReportById(reportId)
@@ -44,6 +50,7 @@ fun ReportDetailScreen(
     LaunchedEffect(reportId) {
         CiudadActivaRepository.refreshReportDetails(reportId)
         CiudadActivaRepository.refreshUsers()
+        CiudadActivaRepository.refreshNotifications()
     }
     
     if (report == null) {
@@ -76,8 +83,30 @@ fun ReportDetailScreen(
     // Interactive state states
     var hasSupported by remember { mutableStateOf(report.hasSupported) }
     var supportCount by remember(report.supportCount) { mutableIntStateOf(report.supportCount) }
-    var isFollowing by remember { mutableStateOf(report.isFollowing) }
-    var notificationsEnabled by remember { mutableStateOf(true) }
+    var isFollowing by remember(report.isFollowing) { mutableStateOf(report.isFollowing) }
+    var notificationsEnabled by remember(report.isFollowing, report.isOwnReport) {
+        mutableStateOf(report.isOwnReport || report.isFollowing)
+    }
+    val detailPhotos = remember(report.id, report.imageUris.size) {
+        mutableStateListOf<Uri>().apply { addAll(report.imageUris) }
+    }
+    val detailGalleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            val savedUri = CiudadActivaRepository.copyUriToInternalStorage(context, uri)
+            if (detailPhotos.size < 3) {
+                detailPhotos.add(savedUri)
+            } else {
+                detailPhotos[detailPhotos.lastIndex] = savedUri
+            }
+            CiudadActivaRepository.saveReportImages(
+                reportId = report.id,
+                reportCode = report.code,
+                uris = detailPhotos.toList()
+            )
+        }
+    }
 
     // Bottom sheets & modals
     var showConfirmResolutionSheet by remember { mutableStateOf(false) }
@@ -666,11 +695,12 @@ fun ReportDetailScreen(
                             .clickable {
                                 val nextFollow = !isFollowing
                                 isFollowing = nextFollow
-                                report.isFollowing = nextFollow
+                                notificationsEnabled = nextFollow || report.isOwnReport
+                                CiudadActivaRepository.setReportFollowed(report.id, report.code, nextFollow)
                                 val uid = CiudadActivaRepository.currentUserId
                                 val repLongId = report.id.toLongOrNull()
-                                if (uid != null && repLongId != null) {
-                                    scope.launch {
+                                scope.launch {
+                                    if (uid != null && repLongId != null) {
                                         try {
                                             if (nextFollow) {
                                                 ApiClient.apiService.followReport(repLongId, uid)
@@ -679,6 +709,7 @@ fun ReportDetailScreen(
                                             }
                                         } catch (_: Exception) { }
                                     }
+                                    CiudadActivaRepository.refreshNotifications()
                                 }
                             }
                             .padding(horizontal = 8.dp, vertical = 6.dp)
@@ -925,19 +956,46 @@ fun ReportDetailScreen(
                             type = CaButtonType.SECUNDARIO
                         )
                     } else {
-                        // Photos of the report (3 thumbnails)
-                        Text(
-                            text = "Fotos del reporte · 3",
-                            style = Texto12Semibold.copy(color = CaNeutralDark)
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            CaReportThumbnail(size = 96.dp, isRealPhotoStyle = true)
-                            CaReportThumbnail(size = 96.dp, isRealPhotoStyle = true)
-                            CaReportThumbnail(size = 96.dp, isRealPhotoStyle = true)
+                        // Photos of the report
+                        if (detailPhotos.isNotEmpty()) {
+                            Text(
+                                text = "Fotos del reporte · ${detailPhotos.size}",
+                                style = Texto12Semibold.copy(color = CaNeutralDark)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                detailPhotos.forEach { uri ->
+                                    CaReportThumbnail(
+                                        size = 96.dp,
+                                        isRealPhotoStyle = true,
+                                        imageUri = uri
+                                    )
+                                }
+                            }
+                        } else {
+                            Text(
+                                text = "Fotos del reporte · Sin fotos adjuntas",
+                                style = Texto12Semibold.copy(color = CaMuted)
+                            )
+                            if (report.isOwnReport) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                CaButton(
+                                    text = "Adjuntar foto al reporte",
+                                    onClick = {
+                                        detailGalleryLauncher.launch(
+                                            PickVisualMediaRequest(
+                                                ActivityResultContracts.PickVisualMedia.ImageOnly
+                                            )
+                                        )
+                                    },
+                                    type = CaButtonType.SECUNDARIO
+                                )
+                            }
                         }
 
                         if (currentStatus == ReportStatus.REABIERTO && currentRole == UserRole.CIUDADANO) {
@@ -1010,7 +1068,25 @@ fun ReportDetailScreen(
                                 )
                                 Switch(
                                     checked = notificationsEnabled,
-                                    onCheckedChange = { notificationsEnabled = it },
+                                    onCheckedChange = { enabled ->
+                                        notificationsEnabled = enabled
+                                        isFollowing = enabled
+                                        CiudadActivaRepository.setReportFollowed(report.id, report.code, enabled)
+                                        val uid = CiudadActivaRepository.currentUserId
+                                        val repLongId = report.id.toLongOrNull()
+                                        scope.launch {
+                                            if (uid != null && repLongId != null) {
+                                                try {
+                                                    if (enabled) {
+                                                        ApiClient.apiService.followReport(repLongId, uid)
+                                                    } else {
+                                                        ApiClient.apiService.unfollowReport(repLongId, uid)
+                                                    }
+                                                } catch (_: Exception) { }
+                                            }
+                                            CiudadActivaRepository.refreshNotifications()
+                                        }
+                                    },
                                     colors = SwitchDefaults.colors(
                                         checkedThumbColor = CaNeutralDark,
                                         checkedTrackColor = CaPrimary
