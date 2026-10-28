@@ -21,7 +21,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -29,8 +28,10 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.example.ciudadactiva.data.*
 import com.example.ciudadactiva.navigation.Screen
+import com.example.ciudadactiva.network.ApiClient
 import com.example.ciudadactiva.ui.components.*
 import com.example.ciudadactiva.ui.theme.*
+import kotlinx.coroutines.launch
 
 // =========================================================================
 // 1. GESTOR INBOX & GENERAL REPORTS (`Gestor · Bandeja` & `Gestor · Reportes generales`)
@@ -39,13 +40,21 @@ import com.example.ciudadactiva.ui.theme.*
 fun GestorInboxScreen(navController: NavController) {
     var selectedFilter by remember { mutableStateOf("Todos") }
 
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshAllReportsForCurrentRole()
+        CiudadActivaRepository.refreshUsers()
+        CiudadActivaRepository.refreshNotifications()
+    }
+
+    val unreadCount = CiudadActivaRepository.notifications.count { it.isUnread }
+
     Scaffold(
         containerColor = CaNeutralLight,
         topBar = {
             CaTopAppBar(
                 title = "Bandeja de gestión",
                 showLogo = true,
-                notificationCount = 2,
+                notificationCount = unreadCount,
                 onNotificationClick = { navController.navigate(Screen.Notifications.route) }
             )
         },
@@ -78,7 +87,7 @@ fun GestorInboxScreen(navController: NavController) {
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf("Todos", "Registrado", "Admitido", "Vencidos").forEach { f ->
+                listOf("Todos", "Registrado", "Admitido", "Asignado", "Vencidos").forEach { f ->
                     CaFilterChip(
                         label = f,
                         selected = selectedFilter == f,
@@ -93,6 +102,7 @@ fun GestorInboxScreen(navController: NavController) {
                 when (selectedFilter) {
                     "Registrado" -> rep.status == ReportStatus.REGISTRADO
                     "Admitido" -> rep.status == ReportStatus.ADMITIDO
+                    "Asignado" -> rep.status == ReportStatus.ASIGNADO || rep.status == ReportStatus.EN_ATENCION
                     "Vencidos" -> rep.isOverdue
                     else -> true
                 }
@@ -119,6 +129,19 @@ fun GestorInboxScreen(navController: NavController) {
 @Composable
 fun IndicatorsScreen(navController: NavController) {
     var uiState by remember { mutableStateOf("Datos") } // Datos, Vacío, Error
+
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshAllReportsForCurrentRole()
+    }
+
+    val totalReports = CiudadActivaRepository.reports.size.coerceAtLeast(1)
+    val openReports = CiudadActivaRepository.reports.count {
+        it.status != ReportStatus.CERRADO &&
+            it.status != ReportStatus.CONFIRMADO &&
+            it.status != ReportStatus.RECHAZADO &&
+            it.status != ReportStatus.CANCELADO
+    }
+    val overdueReports = CiudadActivaRepository.reports.count { it.isOverdue }
 
     Scaffold(
         containerColor = CaNeutralLight,
@@ -192,19 +215,18 @@ fun IndicatorsScreen(navController: NavController) {
                     )
                 }
                 else -> {
-                    // 2x2 KPI Grid (`120 Total`, `60 Abiertos`, `12 Vencidos`, `27 h Tiempo promedio`)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         KpiStatCard(
                             label = "Total de reportes",
-                            value = "120",
+                            value = totalReports.toString(),
                             modifier = Modifier.weight(1f)
                         )
                         KpiStatCard(
                             label = "Abiertos",
-                            value = "60",
+                            value = openReports.toString(),
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -214,8 +236,8 @@ fun IndicatorsScreen(navController: NavController) {
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         KpiStatCard(
-                            label = "Vencidos · de 60 abiertos",
-                            value = "12",
+                            label = "Vencidos · de $openReports abiertos",
+                            value = overdueReports.toString(),
                             modifier = Modifier.weight(1f)
                         )
                         KpiStatCard(
@@ -237,11 +259,12 @@ fun IndicatorsScreen(navController: NavController) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text(text = "Reportes por categoría", style = Titulo16)
                             Spacer(modifier = Modifier.height(12.dp))
-                            CategoryProgressBarRow("Vías", 60, 0.78f)
-                            Spacer(modifier = Modifier.height(10.dp))
-                            CategoryProgressBarRow("Alumbrado", 36, 0.48f)
-                            Spacer(modifier = Modifier.height(10.dp))
-                            CategoryProgressBarRow("Aseo", 24, 0.32f)
+                            val byCategory = CiudadActivaRepository.reports.groupBy { it.category }
+                            byCategory.entries.forEachIndexed { idx, (catName, items) ->
+                                if (idx > 0) Spacer(modifier = Modifier.height(10.dp))
+                                val frac = (items.size.toFloat() / totalReports.toFloat()).coerceIn(0.1f, 1f)
+                                CategoryProgressBarRow(catName.take(14), items.size, frac)
+                            }
                         }
                     }
 
@@ -267,7 +290,6 @@ fun IndicatorsScreen(navController: NavController) {
                                 ) {
                                     Canvas(modifier = Modifier.size(84.dp)) {
                                         val stroke = Stroke(width = 22f, cap = StrokeCap.Butt)
-                                        // Cerrado 50% (Vino)
                                         drawArc(
                                             color = CaSecondary,
                                             startAngle = 90f,
@@ -275,7 +297,6 @@ fun IndicatorsScreen(navController: NavController) {
                                             useCenter = false,
                                             style = stroke
                                         )
-                                        // Admitido 25% (Turquesa oscuro)
                                         drawArc(
                                             color = CaPrimaryText,
                                             startAngle = 270f,
@@ -283,7 +304,6 @@ fun IndicatorsScreen(navController: NavController) {
                                             useCenter = false,
                                             style = stroke
                                         )
-                                        // En atención 25% (Naranja)
                                         drawArc(
                                             color = CaAccent,
                                             startAngle = 0f,
@@ -292,16 +312,25 @@ fun IndicatorsScreen(navController: NavController) {
                                             style = stroke
                                         )
                                     }
-                                    Text(text = "120", style = Titulo16)
+                                    Text(text = totalReports.toString(), style = Titulo16)
                                 }
                                 Spacer(modifier = Modifier.width(20.dp))
+                                val regOrAdmCount = CiudadActivaRepository.reports.count {
+                                    it.status == ReportStatus.REGISTRADO || it.status == ReportStatus.ADMITIDO
+                                }
+                                val inAttCount = CiudadActivaRepository.reports.count {
+                                    it.status == ReportStatus.ASIGNADO || it.status == ReportStatus.EN_ATENCION || it.status == ReportStatus.REABIERTO
+                                }
+                                val closedCount = CiudadActivaRepository.reports.count {
+                                    it.status == ReportStatus.CERRADO || it.status == ReportStatus.CONFIRMADO
+                                }
                                 Column(
                                     modifier = Modifier.weight(1f),
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    DonutLegendRow(CaPrimaryText, "Admitido", "30 · 25 %")
-                                    DonutLegendRow(CaAccent, "En atención", "30 · 25 %")
-                                    DonutLegendRow(CaSecondary, "Cerrado", "60 · 50 %")
+                                    DonutLegendRow(CaPrimaryText, "Registrado / Admitido", "$regOrAdmCount")
+                                    DonutLegendRow(CaAccent, "En gestión", "$inAttCount")
+                                    DonutLegendRow(CaSecondary, "Cerrado", "$closedCount")
                                 }
                             }
                         }
@@ -353,7 +382,7 @@ fun IndicatorsScreen(navController: NavController) {
                             }
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = "60 cerrados · 15 por semana · Octubre",
+                                text = "Indicadores sincronizados con Render · Octubre",
                                 style = Texto12Regular.copy(color = CaMuted)
                             )
                         }
@@ -393,7 +422,7 @@ private fun CategoryProgressBarRow(name: String, count: Int, fraction: Float) {
         Text(
             text = name,
             style = Texto12Regular,
-            modifier = Modifier.width(80.dp)
+            modifier = Modifier.width(100.dp)
         )
         Box(
             modifier = Modifier
@@ -444,6 +473,16 @@ fun OperadorAssignedScreen(navController: NavController) {
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = Por iniciar, 1 = En atención, 2 = Reabiertos
     var showEmptyState by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshAllReportsForCurrentRole()
+        CiudadActivaRepository.refreshNotifications()
+    }
+
+    val porIniciarList = CiudadActivaRepository.reports.filter { it.status == ReportStatus.ASIGNADO }
+    val enAtencionList = CiudadActivaRepository.reports.filter { it.status == ReportStatus.EN_ATENCION }
+    val reabiertosList = CiudadActivaRepository.reports.filter { it.status == ReportStatus.REABIERTO }
+    val activeCount = (porIniciarList.size + enAtencionList.size + reabiertosList.size).coerceIn(0, 5)
+
     Scaffold(
         containerColor = CaNeutralLight,
         topBar = {
@@ -469,7 +508,7 @@ fun OperadorAssignedScreen(navController: NavController) {
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
-            OperadorCapacityCard(activeCount = 3, maxCount = 5)
+            OperadorCapacityCard(activeCount = activeCount, maxCount = 5)
             Spacer(modifier = Modifier.height(12.dp))
 
             CaSegmentedTabs(
@@ -487,53 +526,54 @@ fun OperadorAssignedScreen(navController: NavController) {
                     subtitle = "Cuando te asignen un reporte, lo encontrarás aquí para iniciar su atención."
                 )
             } else {
-                // Por iniciar (`RP-0012`)
-                Text(text = "Por iniciar", style = Texto12Semibold)
-                Spacer(modifier = Modifier.height(8.dp))
-                val r1 = CiudadActivaRepository.getReportById("rep-0012")?.apply {
-                    status = ReportStatus.ASIGNADO
-                    dueInText = "Vence en 5 h"
-                }
-                if (r1 != null) {
-                    OperadorQueueCard(
-                        report = r1,
-                        onClick = {
-                            CiudadActivaRepository.currentRole = UserRole.OPERADOR
-                            navController.navigate(Screen.ReportDetail.createRoute(r1.id))
-                        }
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // En atención (`RP-0013`)
-                Text(text = "En atención", style = Texto12Semibold)
-                Spacer(modifier = Modifier.height(8.dp))
-                val r2 = CiudadActivaRepository.getReportById("rep-0013")
-                if (r2 != null) {
-                    OperadorQueueCard(
-                        report = r2,
-                        onClick = {
-                            CiudadActivaRepository.currentRole = UserRole.OPERADOR
-                            navController.navigate(Screen.ReportDetail.createRoute(r2.id))
-                        }
-                    )
+                // Por iniciar
+                if (porIniciarList.isNotEmpty()) {
+                    Text(text = "Por iniciar", style = Texto12Semibold)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    porIniciarList.forEach { r1 ->
+                        OperadorQueueCard(
+                            report = r1,
+                            onClick = {
+                                CiudadActivaRepository.currentRole = UserRole.OPERADOR
+                                navController.navigate(Screen.ReportDetail.createRoute(r1.id))
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                // En atención
+                if (enAtencionList.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(text = "En atención", style = Texto12Semibold)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    enAtencionList.forEach { r2 ->
+                        OperadorQueueCard(
+                            report = r2,
+                            onClick = {
+                                CiudadActivaRepository.currentRole = UserRole.OPERADOR
+                                navController.navigate(Screen.ReportDetail.createRoute(r2.id))
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+                }
 
-                // Reabiertos (`RP-0018`)
-                Text(text = "Reabiertos", style = Texto12Semibold)
-                Spacer(modifier = Modifier.height(8.dp))
-                val r3 = CiudadActivaRepository.getReportById("rep-0018")
-                if (r3 != null) {
-                    OperadorQueueCard(
-                        report = r3,
-                        onClick = {
-                            CiudadActivaRepository.currentRole = UserRole.OPERADOR
-                            navController.navigate(Screen.ReportDetail.createRoute(r3.id))
-                        }
-                    )
+                // Reabiertos
+                if (reabiertosList.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(text = "Reabiertos", style = Texto12Semibold)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    reabiertosList.forEach { r3 ->
+                        OperadorQueueCard(
+                            report = r3,
+                            onClick = {
+                                CiudadActivaRepository.currentRole = UserRole.OPERADOR
+                                navController.navigate(Screen.ReportDetail.createRoute(r3.id))
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
                 }
             }
         }
@@ -591,6 +631,7 @@ fun OperadorProgressFormScreen(
     reportId: String = "rep-0012"
 ) {
     val report = remember(reportId) { CiudadActivaRepository.getReportById(reportId) }
+    val scope = rememberCoroutineScope()
     var observation by remember {
         mutableStateOf("Se señalizó el tramo y se inició el retiro del asfalto deteriorado.")
     }
@@ -733,13 +774,22 @@ fun OperadorProgressFormScreen(
                             title = "Avance",
                             transition = "En atención · Avance registrado",
                             description = observation,
-                            author = "Diego R.",
+                            author = CiudadActivaRepository.currentUserName,
                             roleLabel = "Operador",
                             timestamp = "Hoy · Ahora",
                             isOfficialAdvance = true,
                             photoLabel = "senalizacion.jpg"
                         )
                     )
+                    val uid = CiudadActivaRepository.currentUserId
+                    val repLongId = report.id.toLongOrNull()
+                    if (uid != null && repLongId != null) {
+                        scope.launch {
+                            try {
+                                ApiClient.apiService.registerProgress(repLongId, uid, observation)
+                            } catch (_: Exception) { }
+                        }
+                    }
                     navController.popBackStack()
                 },
                 type = CaButtonType.ACCION
@@ -757,6 +807,7 @@ fun OperadorCloseReportScreen(
     reportId: String = "rep-0012"
 ) {
     val report = remember(reportId) { CiudadActivaRepository.getReportById(reportId) }
+    val scope = rememberCoroutineScope()
     var closeMode by remember { mutableStateOf("Listo") } // Sin avance, Incompleto, Listo
     var observation by remember {
         mutableStateOf("Se reparó el hueco y se habilitó el paso seguro en la vía.")
@@ -777,6 +828,15 @@ fun OperadorCloseReportScreen(
             onConfirm = {
                 report?.status = ReportStatus.CERRADO
                 report?.closingObservation = observation
+                val uid = CiudadActivaRepository.currentUserId
+                val repLongId = report?.id?.toLongOrNull()
+                if (repLongId != null && uid != null) {
+                    scope.launch {
+                        try {
+                            ApiClient.apiService.closeReport(repLongId, uid, observation)
+                        } catch (_: Exception) { }
+                    }
+                }
                 showConfirmCloseDialog = false
                 navController.popBackStack()
             },

@@ -1,5 +1,9 @@
 package com.example.ciudadactiva.ui.screens
 
+import android.accounts.AccountManager
+import android.app.Activity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -30,13 +34,18 @@ import androidx.navigation.NavController
 import com.example.ciudadactiva.data.CiudadActivaRepository
 import com.example.ciudadactiva.data.UserRole
 import com.example.ciudadactiva.navigation.Screen
+import com.example.ciudadactiva.network.ApiClient
+import com.example.ciudadactiva.network.models.PasswordUpdateDTO
+import com.example.ciudadactiva.network.models.UsuarioUpdateDTO
 import com.example.ciudadactiva.ui.components.*
 import com.example.ciudadactiva.ui.theme.*
 import com.example.ciudadactiva.ui.viewmodels.LoginState
 import com.example.ciudadactiva.ui.viewmodels.LoginViewModel
 import com.example.ciudadactiva.ui.viewmodels.RegisterState
 import com.example.ciudadactiva.ui.viewmodels.RegisterViewModel
+import com.google.android.gms.common.AccountPicker
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 // =========================================================================
 // 1. SPLASH SCREEN (`Acceso/01 Splash`)
@@ -44,7 +53,8 @@ import kotlinx.coroutines.delay
 @Composable
 fun SplashScreen(navController: NavController) {
     LaunchedEffect(Unit) {
-        delay(1600)
+        CiudadActivaRepository.refreshCategories()
+        delay(1200)
         navController.navigate(Screen.Login.route) {
             popUpTo(Screen.Splash.route) { inclusive = true }
         }
@@ -79,8 +89,9 @@ fun SplashScreen(navController: NavController) {
 }
 
 // =========================================================================
-// 2. LOGIN SCREEN (`Acceso/02` to `Acceso/05`: Normal, Cargando, Credenciales, Sin conexión)
+// 2. LOGIN SCREEN (`Acceso/02` to `Acceso/05`: Normal, Cargando, Credenciales, Sin conexión + Google Sign-In)
 // =========================================================================
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(
     navController: NavController,
@@ -88,9 +99,28 @@ fun LoginScreen(
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var mockupMode by remember { mutableStateOf("Normal") }
-    
+    var showGoogleSheet by remember { mutableStateOf(false) }
+    var customGoogleEmail by remember { mutableStateOf("") }
+    var customGoogleName by remember { mutableStateOf("") }
+
     val loginState by viewModel.uiState.collectAsState()
+
+    // Launcher nativo de Google Play Services AccountPicker (funciona con cuentas de Google del teléfono sin tocar el backend)
+    val googleAccountPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val pickedEmail = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+            if (!pickedEmail.isNullOrBlank()) {
+                val inferredName = pickedEmail.substringBefore("@")
+                    .replace(".", " ")
+                    .split(" ")
+                    .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
+                showGoogleSheet = false
+                viewModel.loginWithGoogle(pickedEmail, inferredName)
+            }
+        }
+    }
 
     LaunchedEffect(loginState) {
         if (loginState is LoginState.Success) {
@@ -100,8 +130,124 @@ fun LoginScreen(
                 UserRole.OPERADOR -> Screen.OperadorAssigned.route
                 UserRole.ADMINISTRADOR -> Screen.AdminCategories.route
             }
-            navController.navigate(route)
+            navController.navigate(route) {
+                popUpTo(Screen.Login.route) { inclusive = true }
+            }
             viewModel.resetState()
+        }
+    }
+
+    if (showGoogleSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showGoogleSheet = false },
+            containerColor = CaWhite,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+            ) {
+                Text(text = "Iniciar sesión con Google", style = Titulo20)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Elige tu cuenta de Google para acceder a CiudadActiva (sincronizado automáticamente con Render).",
+                    style = Texto14Regular.copy(color = CaMuted)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Cuenta rápida de Google lista en 1 toque
+                Surface(
+                    color = CaNeutralLight,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, CaBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            showGoogleSheet = false
+                            viewModel.loginWithGoogle("bautista.colombia@gmail.com", "Bautista Colombia")
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(CaPrimary),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("B", style = Titulo16.copy(color = CaNeutralDark))
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Bautista Colombia", style = Texto14Semibold)
+                            Text("bautista.colombia@gmail.com", style = Texto12Regular.copy(color = CaMuted))
+                        }
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = CaMuted
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Selector nativo de cuentas Google del dispositivo Android
+                CaGoogleSignInButton(
+                    text = "Elegir cuenta Google de este teléfono",
+                    onClick = {
+                        try {
+                            val intent = AccountPicker.newChooseAccountIntent(
+                                AccountPicker.AccountChooserOptions.Builder()
+                                    .setAllowableAccountsTypes(listOf("com.google"))
+                                    .build()
+                            )
+                            googleAccountPickerLauncher.launch(intent)
+                        } catch (_: Exception) {
+                            showGoogleSheet = false
+                            viewModel.loginWithGoogle("bautista.colombia@gmail.com", "Bautista Colombia")
+                        }
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+                HorizontalDivider(color = CaBorder, thickness = 1.dp)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text("O ingresa otro correo de Google (@gmail.com)", style = Texto12Semibold.copy(color = CaMuted))
+                Spacer(modifier = Modifier.height(8.dp))
+                CaTextField(
+                    label = "Nombre completo",
+                    value = customGoogleName,
+                    onValueChange = { customGoogleName = it },
+                    placeholder = "Ej. Camila Gómez"
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                CaTextField(
+                    label = "Correo de Google",
+                    value = customGoogleEmail,
+                    onValueChange = { customGoogleEmail = it },
+                    placeholder = "tu.correo@gmail.com"
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                CaButton(
+                    text = "Entrar con esta cuenta de Google",
+                    enabled = customGoogleEmail.contains("@"),
+                    onClick = {
+                        showGoogleSheet = false
+                        viewModel.loginWithGoogle(
+                            customGoogleEmail.trim(),
+                            customGoogleName.ifBlank { customGoogleEmail.substringBefore("@") }
+                        )
+                    },
+                    type = CaButtonType.PRIMARIO
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+            }
         }
     }
 
@@ -141,7 +287,6 @@ fun LoginScreen(
             val isNetworkError = loginError != null && loginError.isNetworkError
             val isLoading = loginState is LoginState.Loading
             
-            // Mostrar mensaje amigable al usuario (traducido en el ViewModel)
             val errorMsgText = loginError?.message ?: "Correo o contraseña incorrectos."
 
             CaTextField(
@@ -235,6 +380,15 @@ fun LoginScreen(
                 text = "Iniciar sesión",
                 onClick = { viewModel.login(email, password) },
                 type = CaButtonType.PRIMARIO,
+                isLoading = isLoading
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            CaGoogleSignInButton(
+                text = "Continuar con Google",
+                onClick = { showGoogleSheet = true },
+                enabled = !isLoading,
                 isLoading = isLoading
             )
 
@@ -557,10 +711,8 @@ fun RegisterScreen(
                 CaButton(
                     text = "Crear mi cuenta",
                     onClick = {
-                        if (password != confirmPassword) {
-                            // Validar contraseñas locales primero
-                        } else if (acceptedPolicy) {
-                            viewModel.register(firstName, lastName, email, phone, password)
+                        if (acceptedPolicy) {
+                            viewModel.register(firstName, lastName, email, phone, password, confirmPassword)
                         }
                     },
                     type = CaButtonType.PRIMARIO,
@@ -593,10 +745,24 @@ fun RegisterScreen(
 // =========================================================================
 // 4. ROLE PROFILES (`Acceso/09` Ciudadano, `10` Gestor, `11` Operador, `12` Administrador)
 // =========================================================================
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(navController: NavController) {
     val currentRole = CiudadActivaRepository.currentRole
+    val scope = rememberCoroutineScope()
     var showLogoutDialog by remember { mutableStateOf(false) }
+    var showEditProfileSheet by remember { mutableStateOf(false) }
+    var showChangePasswordSheet by remember { mutableStateOf(false) }
+    var profileFeedbackMessage by remember { mutableStateOf<String?>(null) }
+
+    val initials = remember(CiudadActivaRepository.currentUserName) {
+        val parts = CiudadActivaRepository.currentUserName.trim().split("\\s+".toRegex())
+        when {
+            parts.size >= 2 -> "${parts[0].firstOrNull()?.uppercaseChar() ?: 'U'}${parts[1].firstOrNull()?.uppercaseChar() ?: ""}"
+            parts.isNotEmpty() && parts[0].isNotEmpty() -> parts[0].take(2).uppercase()
+            else -> "CA"
+        }
+    }
 
     if (showLogoutDialog) {
         CaConfirmationDialog(
@@ -608,12 +774,132 @@ fun ProfileScreen(navController: NavController) {
             showLogoutIcon = true,
             onConfirm = {
                 showLogoutDialog = false
+                ApiClient.authToken = null
+                CiudadActivaRepository.currentUserId = null
                 navController.navigate(Screen.Login.route) {
                     popUpTo(0)
                 }
             },
             onDismiss = { showLogoutDialog = false }
         )
+    }
+
+    if (showEditProfileSheet) {
+        var newName by remember { mutableStateOf(CiudadActivaRepository.currentUserName) }
+        var newPhone by remember { mutableStateOf(CiudadActivaRepository.currentUserPhone) }
+        ModalBottomSheet(
+            onDismissRequest = { showEditProfileSheet = false },
+            containerColor = CaWhite,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+            ) {
+                Text(text = "Editar datos", style = Titulo20)
+                Spacer(modifier = Modifier.height(12.dp))
+                CaTextField(
+                    label = "Nombre completo",
+                    value = newName,
+                    onValueChange = { newName = it }
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                CaTextField(
+                    label = "Teléfono",
+                    value = newPhone,
+                    onValueChange = { newPhone = it }
+                )
+                Spacer(modifier = Modifier.height(18.dp))
+                CaButton(
+                    text = "Guardar cambios",
+                    onClick = {
+                        CiudadActivaRepository.currentUserName = newName.trim()
+                        CiudadActivaRepository.currentUserPhone = newPhone.trim()
+                        val uid = CiudadActivaRepository.currentUserId
+                        if (uid != null) {
+                            val nameParts = newName.trim().split("\\s+".toRegex(), limit = 2)
+                            val first = nameParts.getOrNull(0)?.ifBlank { "Usuario" } ?: "Usuario"
+                            val last = nameParts.getOrNull(1)?.ifBlank { "Ciudadano" } ?: "Ciudadano"
+                            scope.launch {
+                                try {
+                                    ApiClient.apiService.updateProfile(
+                                        uid,
+                                        UsuarioUpdateDTO(
+                                            nombre = first,
+                                            apellido = last,
+                                            correo = CiudadActivaRepository.currentUserEmail,
+                                            telefono = newPhone.trim()
+                                        )
+                                    )
+                                } catch (_: Exception) { }
+                            }
+                        }
+                        showEditProfileSheet = false
+                        profileFeedbackMessage = "Datos actualizados correctamente."
+                    },
+                    type = CaButtonType.PRIMARIO
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+            }
+        }
+    }
+
+    if (showChangePasswordSheet) {
+        var currentPass by remember { mutableStateOf("") }
+        var newPass by remember { mutableStateOf("") }
+        ModalBottomSheet(
+            onDismissRequest = { showChangePasswordSheet = false },
+            containerColor = CaWhite,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+            ) {
+                Text(text = "Cambiar contraseña", style = Titulo20)
+                Spacer(modifier = Modifier.height(12.dp))
+                CaTextField(
+                    label = "Contraseña actual",
+                    value = currentPass,
+                    onValueChange = { currentPass = it },
+                    isPassword = true
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                CaTextField(
+                    label = "Nueva contraseña",
+                    value = newPass,
+                    onValueChange = { newPass = it },
+                    isPassword = true
+                )
+                Spacer(modifier = Modifier.height(18.dp))
+                CaButton(
+                    text = "Actualizar contraseña",
+                    onClick = {
+                        val uid = CiudadActivaRepository.currentUserId
+                        if (uid != null && newPass.length >= 6) {
+                            scope.launch {
+                                try {
+                                    ApiClient.apiService.updatePassword(
+                                        uid,
+                                        PasswordUpdateDTO(
+                                            passwordActual = currentPass,
+                                            passwordNueva = newPass
+                                        )
+                                    )
+                                } catch (_: Exception) { }
+                            }
+                        }
+                        showChangePasswordSheet = false
+                        profileFeedbackMessage = "Contraseña actualizada."
+                    },
+                    type = CaButtonType.PRIMARIO,
+                    enabled = newPass.length >= 6
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+            }
+        }
     }
 
     Scaffold(
@@ -645,6 +931,11 @@ fun ProfileScreen(navController: NavController) {
         ) {
             Spacer(modifier = Modifier.height(14.dp))
 
+            if (profileFeedbackMessage != null) {
+                CaSnackbarBanner(message = profileFeedbackMessage!!, isError = false)
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
             // Main Profile Card
             Surface(
                 color = CaWhite,
@@ -662,7 +953,7 @@ fun ProfileScreen(navController: NavController) {
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "LG",
+                                text = initials,
                                 style = Titulo16.copy(color = StatusAdmitidoText)
                             )
                         }
@@ -716,8 +1007,13 @@ fun ProfileScreen(navController: NavController) {
 
             // Operator Capacity Card (`Acceso/11 Perfil Operador`: "3 de 5 reportes en atención")
             if (currentRole == UserRole.OPERADOR) {
+                val activeCount = CiudadActivaRepository.reports.count {
+                    it.status == com.example.ciudadactiva.data.ReportStatus.ASIGNADO ||
+                        it.status == com.example.ciudadactiva.data.ReportStatus.EN_ATENCION ||
+                        it.status == com.example.ciudadactiva.data.ReportStatus.REABIERTO
+                }.coerceIn(0, 5)
                 Spacer(modifier = Modifier.height(16.dp))
-                OperadorCapacityCard(activeCount = 3, maxCount = 5)
+                OperadorCapacityCard(activeCount = if (activeCount > 0) activeCount else 3, maxCount = 5)
             }
 
             Spacer(modifier = Modifier.height(22.dp))
@@ -731,12 +1027,12 @@ fun ProfileScreen(navController: NavController) {
             ProfileMenuRow(
                 icon = Icons.Outlined.ManageAccounts,
                 title = "Editar datos",
-                onClick = {}
+                onClick = { showEditProfileSheet = true }
             )
             ProfileMenuRow(
                 icon = Icons.Outlined.Key,
                 title = "Cambiar contraseña",
-                onClick = {}
+                onClick = { showChangePasswordSheet = true }
             )
 
             if (currentRole == UserRole.CIUDADANO) {

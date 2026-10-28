@@ -1,5 +1,11 @@
 package com.example.ciudadactiva.ui.components
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Paint
+import android.graphics.drawable.BitmapDrawable
+import android.net.Uri
+import android.view.MotionEvent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -42,9 +48,21 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import coil.compose.AsyncImage
 import com.example.ciudadactiva.R
 import com.example.ciudadactiva.data.*
 import com.example.ciudadactiva.ui.theme.*
+import org.osmdroid.config.Configuration
+import org.osmdroid.events.MapEventsReceiver
+import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
+import org.osmdroid.tileprovider.tilesource.XYTileSource
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.util.MapTileIndex
+import org.osmdroid.views.CustomZoomButtonsController
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.MapEventsOverlay
+import org.osmdroid.views.overlay.Marker
 
 // =========================================================================
 // 1. LOGO & BRAND COMPOSITION (`Logo/Icono` & `Marca/Composición`)
@@ -336,11 +354,7 @@ fun CaDropdownSelector(
                 onValueChange = {},
                 readOnly = true,
                 trailingIcon = {
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowDown,
-                        contentDescription = null,
-                        tint = CaNeutralDark
-                    )
+                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
                 },
                 shape = RoundedCornerShape(12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -572,6 +586,7 @@ fun CaStarRating(
 fun CaReportThumbnail(
     size: Dp = 72.dp,
     isRealPhotoStyle: Boolean = false,
+    imageUri: Uri? = null,
     onRemove: (() -> Unit)? = null
 ) {
     Box(
@@ -581,7 +596,14 @@ fun CaReportThumbnail(
             .background(if (isRealPhotoStyle) Color(0xFF4A575C) else ThumbnailBlueBg),
         contentAlignment = Alignment.Center
     ) {
-        if (isRealPhotoStyle) {
+        if (imageUri != null) {
+            AsyncImage(
+                model = imageUri,
+                contentDescription = "Foto adjunta",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else if (isRealPhotoStyle) {
             // Urban street pothole / infrastructure vector illustration
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawRect(color = Color(0xFF6B787E))
@@ -946,15 +968,87 @@ fun CaBottomNavigationBar(
 }
 
 // =========================================================================
-// 8. MAP PLACEHOLDER & MARKER (`Mapa` & `Marcador mapa`)
+// 8. REAL INTERACTIVE MAP OF COLOMBIA (`osmdroid` OpenStreetMap + Exact Pin)
 // =========================================================================
+private fun createCiudadActivaPinDrawable(
+    context: Context,
+    isSelected: Boolean = true
+): BitmapDrawable {
+    val density = context.resources.displayMetrics.density
+    val w = (if (isSelected) 40 else 32) * density
+    val h = (if (isSelected) 50 else 40) * density
+    val bitmap = Bitmap.createBitmap(w.toInt().coerceAtLeast(32), h.toInt().coerceAtLeast(40), Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bitmap)
+
+    val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = if (isSelected) android.graphics.Color.parseColor("#FF9810") else android.graphics.Color.parseColor("#00796B")
+    }
+    val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f * density
+        color = android.graphics.Color.parseColor("#1D2B2A")
+    }
+    val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = android.graphics.Color.WHITE
+    }
+
+    val path = android.graphics.Path().apply {
+        moveTo(w * 0.5f, h * 0.95f)
+        cubicTo(w * 0.15f, h * 0.62f, w * 0.06f, h * 0.45f, w * 0.06f, h * 0.36f)
+        cubicTo(w * 0.06f, h * 0.12f, w * 0.25f, h * 0.04f, w * 0.5f, h * 0.04f)
+        cubicTo(w * 0.75f, h * 0.04f, w * 0.94f, h * 0.12f, w * 0.94f, h * 0.36f)
+        cubicTo(w * 0.94f, h * 0.45f, w * 0.85f, h * 0.62f, w * 0.5f, h * 0.95f)
+        close()
+    }
+
+    canvas.drawPath(path, fillPaint)
+    canvas.drawPath(path, strokePaint)
+    canvas.drawCircle(w * 0.5f, h * 0.36f, w * 0.18f, innerPaint)
+    canvas.drawCircle(w * 0.5f, h * 0.36f, w * 0.18f, strokePaint)
+
+    return BitmapDrawable(context.resources, bitmap)
+}
+
+private val ColombiaStreetTileSource: OnlineTileSourceBase = object : XYTileSource(
+    "HotOpenStreetMapColombia",
+    0,
+    19,
+    256,
+    ".png",
+    arrayOf(
+        "https://a.tile.openstreetmap.fr/hot/",
+        "https://b.tile.openstreetmap.fr/hot/",
+        "https://c.tile.openstreetmap.fr/hot/"
+    ),
+    "© OpenStreetMap contributors, Tiles courtesy of Humanitarian OpenStreetMap Team"
+) {
+    override fun getTileURLString(pMapTileIndex: Long): String {
+        return baseUrl + MapTileIndex.getZoom(pMapTileIndex) + "/" +
+            MapTileIndex.getX(pMapTileIndex) + "/" +
+            MapTileIndex.getY(pMapTileIndex) + mImageFilenameEnding
+    }
+}
+
 @Composable
 fun CaCityMapPlaceholder(
     locationLabel: String = "Ubicación del reporte",
-    height: Dp = 180.dp,
+    height: Dp = 200.dp,
     multiplePins: Boolean = false,
-    showGpsBadge: Boolean = false
+    showGpsBadge: Boolean = false,
+    latitude: Double = 4.6351,
+    longitude: Double = -74.0703,
+    reportsOnMap: List<ReportItem> = emptyList(),
+    selectedReportId: String? = null,
+    onReportPinClick: ((ReportItem) -> Unit)? = null,
+    onLocationPicked: ((Double, Double) -> Unit)? = null
 ) {
+    // Normalizamos las coordenadas para que siempre apunten dentro de Colombia si vienen vacías o en 0,0
+    val safeLat = if (latitude in -4.5..13.5 && latitude != 0.0) latitude else 4.6351
+    val safeLon = if (longitude in -82.0..-66.0 && longitude != 0.0) longitude else -74.0703
+    var mapViewRef by remember { mutableStateOf<MapView?>(null) }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -963,97 +1057,228 @@ fun CaCityMapPlaceholder(
             .background(CaWhite)
             .border(1.dp, CaBorder, RoundedCornerShape(16.dp))
     ) {
-        // City blocks grid
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val blockColor = Color(0xFFE3E6E2)
-            val parkColor = Color(0xFFCCEFED)
-            val w = size.width
-            val h = size.height
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                Configuration.getInstance().userAgentValue = "CiudadActivaApp/2.0"
+                MapView(ctx).apply {
+                    setTileSource(ColombiaStreetTileSource)
+                    setMultiTouchControls(true)
+                    zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
+                    controller.setZoom(if (multiplePins) 14.5 else 17.0)
+                    controller.setCenter(GeoPoint(safeLat, safeLon))
 
-            // Row 1 blocks
-            drawRoundRect(blockColor, Offset(0f, 0f), Size(w * 0.36f, h * 0.42f), CornerRadius(8f))
-            drawRoundRect(blockColor, Offset(w * 0.40f, 0f), Size(w * 0.59f, h * 0.42f), CornerRadius(8f))
+                    // Permitir arrastrar el mapa libremente dentro de pantallas con scroll vertical
+                    setOnTouchListener { v, event ->
+                        when (event.action) {
+                            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE ->
+                                v.parent?.requestDisallowInterceptTouchEvent(true)
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                                v.parent?.requestDisallowInterceptTouchEvent(false)
+                        }
+                        false
+                    }
+                    mapViewRef = this
+                }
+            },
+            update = { mapView ->
+                val ctx = mapView.context
+                mapView.overlays.clear()
 
-            // Row 2 blocks
-            drawRoundRect(blockColor, Offset(0f, h * 0.48f), Size(w * 0.36f, h * 0.52f), CornerRadius(8f))
-            drawRoundRect(blockColor, Offset(w * 0.40f, h * 0.48f), Size(w * 0.59f, h * 0.52f), CornerRadius(8f))
+                // Si se permite elegir punto tocando el mapa (Crear / Editar reporte)
+                if (onLocationPicked != null) {
+                    val eventsReceiver = object : MapEventsReceiver {
+                        override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
+                            if (p != null) {
+                                onLocationPicked(p.latitude, p.longitude)
+                                mapView.controller.animateTo(p)
+                            }
+                            return true
+                        }
 
-            // Turquoise park area
-            drawRoundRect(
-                color = parkColor,
-                topLeft = Offset(w * 0.62f, h * 0.18f),
-                size = Size(w * 0.28f, h * 0.32f),
-                cornerRadius = CornerRadius(24f, 24f)
-            )
-        }
+                        override fun longPressHelper(p: GeoPoint?): Boolean {
+                            if (p != null) {
+                                onLocationPicked(p.latitude, p.longitude)
+                                mapView.controller.animateTo(p)
+                            }
+                            return true
+                        }
+                    }
+                    mapView.overlays.add(MapEventsOverlay(eventsReceiver))
+                }
 
-        // Main Orange Marker
-        CaMapPin(
-            modifier = Modifier
-                .align(if (multiplePins) Alignment.Center else Alignment.TopStart)
-                .padding(start = 14.dp, top = 10.dp)
+                if (multiplePins && reportsOnMap.isNotEmpty()) {
+                    reportsOnMap.forEach { rep ->
+                        val rLat = if (rep.latitude in -4.5..13.5 && rep.latitude != 0.0) rep.latitude else 4.6351
+                        val rLon = if (rep.longitude in -82.0..-66.0 && rep.longitude != 0.0) rep.longitude else -74.0703
+                        val isSel = selectedReportId == null || rep.id == selectedReportId || rep.code == selectedReportId
+                        val marker = Marker(mapView).apply {
+                            position = GeoPoint(rLat, rLon)
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                            icon = createCiudadActivaPinDrawable(ctx, isSelected = isSel)
+                            title = "${rep.code} · ${rep.category}"
+                            snippet = rep.location
+                            setOnMarkerClickListener { m, _ ->
+                                onReportPinClick?.invoke(rep)
+                                mapView.controller.animateTo(m.position)
+                                m.showInfoWindow()
+                                true
+                            }
+                        }
+                        mapView.overlays.add(marker)
+                    }
+                } else {
+                    val point = GeoPoint(safeLat, safeLon)
+                    val marker = Marker(mapView).apply {
+                        position = point
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                        icon = createCiudadActivaPinDrawable(ctx, isSelected = true)
+                        title = locationLabel.ifBlank { "Punto exacto del reporte" }
+                        snippet = String.format("Lat: %.5f, Lon: %.5f · Colombia", safeLat, safeLon)
+                    }
+                    mapView.overlays.add(marker)
+                    mapView.controller.setCenter(point)
+                }
+                mapView.invalidate()
+            }
         )
 
-        if (multiplePins) {
-            CaMapPin(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = 52.dp, top = 42.dp),
-                scale = 0.8f
-            )
-            CaMapPin(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = 48.dp, bottom = 36.dp),
-                scale = 0.8f
-            )
-            CaMapPin(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 56.dp, bottom = 44.dp),
-                scale = 0.8f
-            )
+        // Badge superior izquierdo: Colombia + Coordenadas exactas
+        Surface(
+            color = CaWhite.copy(alpha = 0.94f),
+            shape = RoundedCornerShape(999.dp),
+            border = BorderStroke(1.dp, CaBorder),
+            shadowElevation = 2.dp,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Place,
+                    contentDescription = null,
+                    tint = CaAccent,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = String.format("Colombia · %.4f, %.4f", safeLat, safeLon),
+                    style = Texto12Semibold.copy(color = CaNeutralDark, fontSize = 11.sp)
+                )
+            }
         }
 
         if (showGpsBadge) {
             Surface(
                 color = StatusAdmitidoBg,
                 shape = RoundedCornerShape(999.dp),
+                shadowElevation = 2.dp,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(12.dp)
+                    .padding(10.dp)
             ) {
                 Text(
                     text = "GPS",
                     style = Texto12Semibold.copy(color = StatusAdmitidoText),
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                 )
+            }
+        }
+
+        // Controles de Zoom y Centrar en el punto exacto
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Surface(
+                color = CaWhite.copy(alpha = 0.94f),
+                shape = CircleShape,
+                border = BorderStroke(1.dp, CaBorder),
+                shadowElevation = 2.dp,
+                modifier = Modifier
+                    .size(34.dp)
+                    .clickable { mapViewRef?.controller?.zoomIn() }
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Acercar mapa",
+                        tint = CaNeutralDark,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            Surface(
+                color = CaWhite.copy(alpha = 0.94f),
+                shape = CircleShape,
+                border = BorderStroke(1.dp, CaBorder),
+                shadowElevation = 2.dp,
+                modifier = Modifier
+                    .size(34.dp)
+                    .clickable { mapViewRef?.controller?.zoomOut() }
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.Remove,
+                        contentDescription = "Alejar mapa",
+                        tint = CaNeutralDark,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            Surface(
+                color = CaPrimary,
+                shape = CircleShape,
+                shadowElevation = 2.dp,
+                modifier = Modifier
+                    .size(34.dp)
+                    .clickable {
+                        mapViewRef?.controller?.animateTo(GeoPoint(safeLat, safeLon))
+                        mapViewRef?.controller?.setZoom(if (multiplePins) 15.0 else 17.5)
+                    }
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Outlined.MyLocation,
+                        contentDescription = "Centrar en el punto",
+                        tint = CaNeutralDark,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
         }
 
         if (locationLabel.isNotEmpty()) {
             Surface(
-                color = CaWhite,
+                color = CaWhite.copy(alpha = 0.95f),
                 shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, CaBorder),
                 shadowElevation = 2.dp,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(12.dp)
+                    .padding(10.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Outlined.MyLocation,
                         contentDescription = null,
                         tint = CaPrimaryText,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(15.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = locationLabel,
-                        style = Texto12Regular.copy(color = CaNeutralDark)
+                        style = Texto12Semibold.copy(color = CaNeutralDark),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -1062,34 +1287,56 @@ fun CaCityMapPlaceholder(
 }
 
 @Composable
-fun CaMapPin(modifier: Modifier = Modifier, scale: Float = 1f) {
-    Canvas(
-        modifier = modifier
-            .width((36 * scale).dp)
-            .height((44 * scale).dp)
-    ) {
-        val w = size.width
-        val h = size.height
-        val pinPath = Path().apply {
-            moveTo(w * 0.5f, h * 0.95f)
-            cubicTo(w * 0.15f, h * 0.62f, w * 0.05f, h * 0.45f, w * 0.05f, h * 0.36f)
-            cubicTo(w * 0.05f, h * 0.12f, w * 0.25f, h * 0.04f, w * 0.5f, h * 0.04f)
-            cubicTo(w * 0.75f, h * 0.04f, w * 0.95f, h * 0.12f, w * 0.95f, h * 0.36f)
-            cubicTo(w * 0.95f, h * 0.45f, w * 0.85f, h * 0.62f, w * 0.5f, h * 0.95f)
-            close()
-        }
-        drawPath(pinPath, color = CaAccent)
-        drawPath(pinPath, color = CaNeutralDark, style = Stroke(width = 3f))
-        drawCircle(
-            color = CaWhite,
-            radius = w * 0.18f,
-            center = Offset(w * 0.5f, h * 0.36f)
+fun CaGoogleSignInButton(
+    text: String = "Continuar con Google",
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    isLoading: Boolean = false,
+    modifier: Modifier = Modifier.fillMaxWidth()
+) {
+    OutlinedButton(
+        onClick = { if (enabled && !isLoading) onClick() },
+        enabled = enabled && !isLoading,
+        modifier = modifier.height(48.dp),
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(1.dp, CaBorder),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = CaWhite,
+            contentColor = CaNeutralDark,
+            disabledContainerColor = CaWhite,
+            disabledContentColor = CaMuted
         )
-        drawCircle(
-            color = CaNeutralDark,
-            radius = w * 0.18f,
-            center = Offset(w * 0.5f, h * 0.36f),
-            style = Stroke(width = 2.5f)
+    ) {
+        // Icono multicolor oficial de Google ("G")
+        Box(
+            modifier = Modifier
+                .size(22.dp)
+                .clip(CircleShape)
+                .background( Color(0xFFF1F3F4) ),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.size(16.dp)) {
+                val stroke = Stroke(width = 3.6f, cap = StrokeCap.Butt)
+                // Rojo superior
+                drawArc(Color(0xFFEA4335), startAngle = 215f, sweepAngle = 100f, useCenter = false, style = stroke)
+                // Amarillo izquierdo
+                drawArc(Color(0xFFFBBC05), startAngle = 135f, sweepAngle = 80f, useCenter = false, style = stroke)
+                // Verde inferior
+                drawArc(Color(0xFF34A853), startAngle = 40f, sweepAngle = 95f, useCenter = false, style = stroke)
+                // Azul derecho + barra horizontal
+                drawArc(Color(0xFF4285F4), startAngle = -15f, sweepAngle = 55f, useCenter = false, style = stroke)
+                drawLine(
+                    color = Color(0xFF4285F4),
+                    start = Offset(size.width * 0.5f, size.height * 0.5f),
+                    end = Offset(size.width * 0.95f, size.height * 0.5f),
+                    strokeWidth = 3.4f
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = text,
+            style = Texto14Semibold.copy(color = if (enabled) CaNeutralDark else CaMuted)
         )
     }
 }

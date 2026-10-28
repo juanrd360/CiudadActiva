@@ -1,5 +1,10 @@
 package com.example.ciudadactiva.ui.screens
 
+import android.Manifest
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,16 +25,22 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import com.example.ciudadactiva.data.*
 import com.example.ciudadactiva.navigation.Screen
+import com.example.ciudadactiva.network.ApiClient
 import com.example.ciudadactiva.ui.components.*
 import com.example.ciudadactiva.ui.theme.*
 import com.example.ciudadactiva.ui.viewmodels.CreateReportState
 import com.example.ciudadactiva.ui.viewmodels.CreateReportViewModel
+import com.google.android.gms.location.LocationServices
+import kotlinx.coroutines.launch
+import java.io.File
 
 // =========================================================================
 // 1. CITIZEN REPORTS FEED, FOLLOWING, MAP & FILTERS
@@ -47,6 +58,13 @@ fun CitizenReportsScreen(navController: NavController) {
     var uiState by remember { mutableStateOf("Normal") } // Normal, Cargando, Vacío, Sin resultados, Error
 
     val currentRole = CiudadActivaRepository.currentRole
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshCategories()
+        CiudadActivaRepository.refreshAllReportsForCurrentRole()
+        CiudadActivaRepository.refreshNotifications()
+    }
 
     if (showFilterSheet) {
         ModalBottomSheet(
@@ -70,43 +88,26 @@ fun CitizenReportsScreen(navController: NavController) {
                 Text(text = "Categoría", style = Titulo16)
                 Spacer(modifier = Modifier.height(10.dp))
 
-                val catOptions = listOf("Vías", "Alumbrado", "Residuos", "Espacios públicos")
+                val catOptions = CiudadActivaRepository.categories.map { it.name }.ifEmpty {
+                    listOf("Malla Vial y Huecos", "Alumbrado Público", "Basuras y Escombros", "Fuga de Agua / Alcantarillado")
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CaFilterChip(
-                            label = catOptions[0],
-                            selected = selectedCategoryFilter == catOptions[0],
-                            onClick = {
-                                selectedCategoryFilter = if (selectedCategoryFilter == catOptions[0]) null else catOptions[0]
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        CaFilterChip(
-                            label = catOptions[1],
-                            selected = selectedCategoryFilter == catOptions[1],
-                            onClick = {
-                                selectedCategoryFilter = if (selectedCategoryFilter == catOptions[1]) null else catOptions[1]
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CaFilterChip(
-                            label = catOptions[2],
-                            selected = selectedCategoryFilter == catOptions[2],
-                            onClick = {
-                                selectedCategoryFilter = if (selectedCategoryFilter == catOptions[2]) null else catOptions[2]
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        CaFilterChip(
-                            label = catOptions[3],
-                            selected = selectedCategoryFilter == catOptions[3],
-                            onClick = {
-                                selectedCategoryFilter = if (selectedCategoryFilter == catOptions[3]) null else catOptions[3]
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
+                    catOptions.chunked(2).forEach { pair ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            pair.forEach { catName ->
+                                CaFilterChip(
+                                    label = catName,
+                                    selected = selectedCategoryFilter == catName,
+                                    onClick = {
+                                        selectedCategoryFilter = if (selectedCategoryFilter == catName) null else catName
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            if (pair.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
                     }
                 }
 
@@ -200,6 +201,8 @@ fun CitizenReportsScreen(navController: NavController) {
         }
     }
 
+    val unreadCount = CiudadActivaRepository.notifications.count { it.isUnread }
+
     Scaffold(
         containerColor = CaNeutralLight,
         topBar = {
@@ -207,7 +210,7 @@ fun CitizenReportsScreen(navController: NavController) {
                 CaTopAppBar(
                     title = "Reportes",
                     showLogo = true,
-                    notificationCount = 3,
+                    notificationCount = unreadCount,
                     onNotificationClick = { navController.navigate(Screen.Notifications.route) }
                 )
                 CaSegmentedTabs(
@@ -341,7 +344,12 @@ fun CitizenReportsScreen(navController: NavController) {
                     CaErrorStateCard(
                         title = "No pudimos cargar los reportes",
                         subtitle = "Revisa tu conexión a internet e intenta de nuevo.",
-                        onRetry = { uiState = "Normal" }
+                        onRetry = {
+                            uiState = "Normal"
+                            scope.launch {
+                                CiudadActivaRepository.refreshAllReportsForCurrentRole()
+                            }
+                        }
                     )
                 }
                 else -> {
@@ -352,19 +360,31 @@ fun CitizenReportsScreen(navController: NavController) {
                     }
 
                     if (isMapView) {
-                        // `Reportes · Vista mapa`
+                        // `Reportes · Vista mapa` - Mapa real de Colombia con todos los reportes
+                        var selectedMapReportId by remember {
+                            mutableStateOf(filteredReports.firstOrNull()?.id)
+                        }
+                        val highlighted = filteredReports.find { it.id == selectedMapReportId }
+                            ?: filteredReports.firstOrNull()
+
                         CaCityMapPlaceholder(
-                            locationLabel = "Chapinero · Bogotá",
-                            height = 400.dp,
-                            multiplePins = true
+                            locationLabel = highlighted?.location ?: "Bogotá · Colombia",
+                            height = 380.dp,
+                            multiplePins = true,
+                            latitude = highlighted?.latitude ?: 4.6351,
+                            longitude = highlighted?.longitude ?: -74.0703,
+                            reportsOnMap = filteredReports,
+                            selectedReportId = highlighted?.id,
+                            onReportPinClick = { clickedReport ->
+                                selectedMapReportId = clickedReport.id
+                            }
                         )
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "Reporte seleccionado · 4 reportes en esta zona",
+                            text = "Reporte seleccionado · ${filteredReports.size} reportes en Colombia (toca un marcador para cambiar)",
                             style = Texto12Regular.copy(color = CaMuted)
                         )
                         Spacer(modifier = Modifier.height(10.dp))
-                        val highlighted = filteredReports.find { it.code == "RP-0013" } ?: filteredReports.firstOrNull()
                         if (highlighted != null) {
                             CaReportCard(
                                 report = highlighted,
@@ -375,6 +395,7 @@ fun CitizenReportsScreen(navController: NavController) {
                         }
                     } else if (selectedTab == 1) {
                         // `Reportes · Siguiendo`
+                        val followed = filteredReports.filter { it.isFollowing || it.hasUnreadUpdate }
                         Text(text = "Con novedades", style = Titulo16)
                         Spacer(modifier = Modifier.height(10.dp))
                         filteredReports.filter { it.hasUnreadUpdate }.forEach { rep ->
@@ -390,7 +411,7 @@ fun CitizenReportsScreen(navController: NavController) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(text = "Sin cambios", style = Titulo16)
                         Spacer(modifier = Modifier.height(10.dp))
-                        filteredReports.filter { !it.hasUnreadUpdate }.take(2).forEach { rep ->
+                        filteredReports.filter { !it.hasUnreadUpdate && it.isFollowing }.forEach { rep ->
                             CaReportCard(
                                 report = rep,
                                 onClick = {
@@ -401,14 +422,14 @@ fun CitizenReportsScreen(navController: NavController) {
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Sigues 3 reportes de tu comunidad",
+                            text = "Sigues ${followed.size} reportes de tu comunidad",
                             style = Texto12Regular.copy(color = CaMuted),
                             textAlign = TextAlign.Center,
                             modifier = Modifier.fillMaxWidth()
                         )
                     } else {
                         // `Reportes · Comunidad`
-                        filteredReports.take(4).forEach { rep ->
+                        filteredReports.forEach { rep ->
                             CaReportCard(
                                 report = rep,
                                 onClick = {
@@ -423,10 +444,14 @@ fun CitizenReportsScreen(navController: NavController) {
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "Cargar más",
+                                text = "Actualizar lista",
                                 style = Texto14Semibold.copy(color = CaPrimaryText),
                                 modifier = Modifier
-                                    .clickable { }
+                                    .clickable {
+                                        scope.launch {
+                                            CiudadActivaRepository.refreshAllReportsForCurrentRole()
+                                        }
+                                    }
                                     .padding(vertical = 8.dp)
                             )
                         }
@@ -447,16 +472,31 @@ fun MyReportsScreen(navController: NavController) {
     var uiState by remember { mutableStateOf("Normal") } // Normal, Vacío, Cargando, Error
     var reportToCancel by remember { mutableStateOf<ReportItem?>(null) }
     var cancelSuccessSnackbar by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshAllReportsForCurrentRole()
+    }
 
     if (reportToCancel != null) {
+        val target = reportToCancel!!
         CaConfirmationDialog(
             title = "¿Cancelar este reporte?",
-            message = "Esta acción no se puede deshacer.\n${reportToCancel!!.code} · ${reportToCancel!!.title}",
+            message = "Esta acción no se puede deshacer.\n${target.code} · ${target.title}",
             confirmText = "Cancelar reporte",
             cancelText = "Volver",
             confirmType = CaButtonType.DESTRUCTIVO,
             onConfirm = {
-                reportToCancel!!.status = ReportStatus.CANCELADO
+                target.status = ReportStatus.CANCELADO
+                val uid = CiudadActivaRepository.currentUserId
+                val repLongId = target.id.toLongOrNull()
+                if (uid != null && repLongId != null) {
+                    scope.launch {
+                        try {
+                            ApiClient.apiService.cancelOwnReport(repLongId, uid)
+                        } catch (_: Exception) { }
+                    }
+                }
                 reportToCancel = null
                 cancelSuccessSnackbar = true
             },
@@ -568,11 +608,23 @@ fun MyReportsScreen(navController: NavController) {
                     CaErrorStateCard(
                         title = "No pudimos cargar tus reportes",
                         subtitle = "Revisa tu conexión e inténtalo de nuevo.",
-                        onRetry = { uiState = "Normal" }
+                        onRetry = {
+                            uiState = "Normal"
+                            scope.launch {
+                                CiudadActivaRepository.refreshAllReportsForCurrentRole()
+                            }
+                        }
                     )
                 }
                 else -> {
-                    val myReports = CiudadActivaRepository.reports.filter { it.isOwnReport }
+                    val myReports = CiudadActivaRepository.reports.filter { rep ->
+                        rep.isOwnReport && when (selectedFilter) {
+                            "Registrado" -> rep.status == ReportStatus.REGISTRADO
+                            "Admitido" -> rep.status == ReportStatus.ADMITIDO
+                            "En atención" -> rep.status == ReportStatus.EN_ATENCION
+                            else -> true
+                        }
+                    }
                     Text(
                         text = "${myReports.size} reportes · Más recientes primero",
                         style = Texto12Regular.copy(color = CaMuted)
@@ -669,8 +721,13 @@ fun CreateOrEditReportScreen(
     viewModel: CreateReportViewModel = viewModel(),
     reportIdToEdit: String? = null
 ) {
+    val context = LocalContext.current
     val existingReport = reportIdToEdit?.let { CiudadActivaRepository.getReportById(it) }
     val isEditing = existingReport != null
+
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshCategories()
+    }
 
     val reportState by viewModel.uiState.collectAsState()
     val isSuccess = reportState is CreateReportState.Success
@@ -679,20 +736,85 @@ fun CreateOrEditReportScreen(
     val isNetworkError = reportError?.isNetworkError == true
     val errorMsgText = reportError?.message
 
-    var category by remember { mutableStateOf(existingReport?.category ?: "Vías") }
-    var categoryId by remember { mutableStateOf<Short?>(null) }
+    val defaultCat = CiudadActivaRepository.categories.firstOrNull { it.isActive }
+    var category by remember {
+        mutableStateOf(existingReport?.category ?: defaultCat?.name ?: "Malla Vial y Huecos")
+    }
+    var categoryId by remember {
+        mutableIntStateOf(existingReport?.categoryId ?: defaultCat?.numericId ?: 1)
+    }
     var title by remember { mutableStateOf(existingReport?.title ?: "") }
     var description by remember { mutableStateOf(existingReport?.description ?: "") }
     var location by remember { mutableStateOf(existingReport?.location ?: "Cra. 7 con calle 45 · Bogotá") }
+    var latitude by remember { mutableDoubleStateOf(existingReport?.latitude ?: 4.6097) }
+    var longitude by remember { mutableDoubleStateOf(existingReport?.longitude ?: -74.0817) }
+    
     var visibility by remember {
         mutableStateOf("Solo tú y el equipo de gestión, hasta su validación")
     }
-    var hasPhoto by remember { mutableStateOf(true) }
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var hasPhoto by remember { mutableStateOf(false) }
     var showEvidenceSheet by remember { mutableStateOf(false) }
+
+    // Camera & Gallery Launchers
+    val cameraFileUri = remember {
+        val file = File(context.cacheDir, "camera_photo.jpg")
+        FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success) {
+            selectedImageUri = cameraFileUri
+            hasPhoto = true
+        }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            selectedImageUri = uri
+            hasPhoto = true
+        }
+    }
+
+    // GPS Location Client
+    val fusedLocationClient = remember {
+        LocationServices.getFusedLocationProviderClient(context)
+    }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                      permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (granted) {
+            try {
+                fusedLocationClient.lastLocation.addOnSuccessListener { loc ->
+                    if (loc != null) {
+                        latitude = loc.latitude
+                        longitude = loc.longitude
+                        location = "Ubicación GPS (${String.format("%.4f", loc.latitude)}, ${String.format("%.4f", loc.longitude)})"
+                    }
+                }
+            } catch (_: SecurityException) { }
+        }
+    }
+
     LaunchedEffect(reportState) {
         if (isSuccess) {
-            navController.navigate(Screen.CitizenReports.route) {
-                popUpTo(Screen.CitizenReports.route) { inclusive = false }
+            if (isEditing) {
+                navController.popBackStack()
+            } else {
+                navController.navigate(Screen.CitizenReports.route) {
+                    popUpTo(Screen.CitizenReports.route) { inclusive = false }
+                }
             }
             viewModel.resetState()
         }
@@ -720,8 +842,8 @@ fun CreateOrEditReportScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            hasPhoto = true
                             showEvidenceSheet = false
+                            cameraLauncher.launch(cameraFileUri)
                         }
                         .padding(vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -733,7 +855,7 @@ fun CreateOrEditReportScreen(
                     )
                     Spacer(modifier = Modifier.width(14.dp))
                     Text(
-                        text = "Tomar foto",
+                        text = "Tomar foto con la cámara",
                         style = Texto14Semibold,
                         modifier = Modifier.weight(1f)
                     )
@@ -742,8 +864,12 @@ fun CreateOrEditReportScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            hasPhoto = true
                             showEvidenceSheet = false
+                            galleryLauncher.launch(
+                                PickVisualMediaRequest(
+                                    ActivityResultContracts.PickVisualMedia.ImageOnly
+                                )
+                            )
                         }
                         .padding(vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -792,7 +918,7 @@ fun CreateOrEditReportScreen(
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
             Text(
-                text = if (isEditing) "${existingReport!!.code} · Registrado" else "Nuevo reporte ciudadano",
+                text = if (isEditing) "${existingReport?.code} · Registrado" else "Nuevo reporte ciudadano",
                 style = Texto14Semibold.copy(color = CaPrimaryText)
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -801,16 +927,9 @@ fun CreateOrEditReportScreen(
                 label = "Categoría *",
                 selectedValue = category,
                 options = CiudadActivaRepository.categories.filter { it.isActive }.map { it.name },
-                onOptionSelected = {
-                    category = it
-                    categoryId = when(it) {
-                        "Vías" -> 1
-                        "Alumbrado público" -> 2
-                        "Arbolado" -> 3
-                        "Residuos" -> 4
-                        "Espacios públicos" -> 5
-                        else -> 1
-                    }
+                onOptionSelected = { selectedName ->
+                    category = selectedName
+                    categoryId = CiudadActivaRepository.categories.find { it.name == selectedName }?.numericId ?: 1
                 }
             )
 
@@ -830,7 +949,7 @@ fun CreateOrEditReportScreen(
                 label = "Descripción *",
                 value = description,
                 onValueChange = { description = it },
-                placeholder = "Describe el lugar con claridad.",
+                placeholder = "Describe el lugar con claridad (mín. 20 caracteres).",
                 singleLine = false,
                 minLines = 3,
                 maxLength = 120,
@@ -839,12 +958,44 @@ fun CreateOrEditReportScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            CaTextField(
-                label = "Ubicación",
-                value = location,
-                onValueChange = { location = it },
-                placeholder = "Dirección o punto de referencia",
-                enabled = !isLoading
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CaTextField(
+                    label = "Ubicación",
+                    value = location,
+                    onValueChange = { location = it },
+                    placeholder = "Dirección o punto de referencia",
+                    enabled = !isLoading,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            CaButton(
+                text = "Obtener ubicación actual por GPS",
+                onClick = {
+                    locationPermissionLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION
+                        )
+                    )
+                },
+                type = CaButtonType.SECUNDARIO
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            CaCityMapPlaceholder(
+                locationLabel = "Toca el mapa de Colombia para ubicar el punto exacto",
+                height = 190.dp,
+                showGpsBadge = true,
+                latitude = latitude,
+                longitude = longitude,
+                onLocationPicked = { pickedLat, pickedLon ->
+                    latitude = pickedLat
+                    longitude = pickedLon
+                    location = String.format("Colombia (%.4f, %.4f)", pickedLat, pickedLon)
+                }
             )
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -864,7 +1015,11 @@ fun CreateOrEditReportScreen(
                     CaReportThumbnail(
                         size = 96.dp,
                         isRealPhotoStyle = true,
-                        onRemove = { hasPhoto = false }
+                        imageUri = selectedImageUri,
+                        onRemove = {
+                            hasPhoto = false
+                            selectedImageUri = null
+                        }
                     )
                 }
                 Column(
@@ -872,7 +1027,7 @@ fun CreateOrEditReportScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     CaButton(
-                        text = if (hasPhoto) "Reemplazar foto" else "Adjuntar foto",
+                        text = if (hasPhoto) "Cambiar foto" else "Adjuntar foto",
                         onClick = { showEvidenceSheet = true },
                         type = CaButtonType.SECUNDARIO
                     )
@@ -881,7 +1036,10 @@ fun CreateOrEditReportScreen(
                         Text(
                             text = "Quitar foto",
                             style = Texto14Semibold.copy(color = CaPrimaryText),
-                            modifier = Modifier.clickable { hasPhoto = false }
+                            modifier = Modifier.clickable {
+                                hasPhoto = false
+                                selectedImageUri = null
+                            }
                         )
                     }
                 }
@@ -929,23 +1087,38 @@ fun CreateOrEditReportScreen(
 
             Spacer(modifier = Modifier.height(28.dp))
 
-            val isFormValid = categoryId != null && description.length >= 20
+            val isFormValid = description.length >= 20
 
             CaButton(
                 text = if (isEditing) "Guardar cambios" else "Enviar reporte",
                 onClick = {
                     if (isEditing && existingReport != null) {
                         existingReport.category = category
-                        existingReport.title = title
+                        existingReport.categoryId = categoryId
+                        existingReport.title = title.ifBlank { description.take(40) }
                         existingReport.description = description
                         existingReport.location = location
-                        navController.popBackStack()
+                        existingReport.latitude = latitude
+                        existingReport.longitude = longitude
+                        val repLongId = existingReport.id.toLongOrNull()
+                        if (repLongId != null) {
+                            viewModel.updateReport(
+                                reportId = repLongId,
+                                categoriaId = categoryId,
+                                descripcion = description,
+                                latitud = latitude,
+                                longitud = longitude,
+                                direccion = location
+                            )
+                        } else {
+                            navController.popBackStack()
+                        }
                     } else if (isFormValid) {
                         viewModel.createReport(
-                            categoriaId = categoryId!!,
+                            categoriaId = categoryId,
                             descripcion = description,
-                            latitud = 4.6097, // Falso
-                            longitud = -74.0817,
+                            latitud = latitude,
+                            longitud = longitude,
                             direccion = location
                         )
                     }
@@ -967,6 +1140,11 @@ fun CreateOrEditReportScreen(
 fun NotificationsScreen(navController: NavController) {
     var uiState by remember { mutableStateOf("Lista") } // Lista, Vacío, Cargando, Error
     val currentRole = CiudadActivaRepository.currentRole
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshNotifications()
+    }
 
     Scaffold(
         containerColor = CaNeutralLight,
@@ -1038,10 +1216,16 @@ fun NotificationsScreen(navController: NavController) {
                     CaErrorStateCard(
                         title = "No pudimos cargar tus avisos",
                         subtitle = "Revisa tu conexión a internet e intenta de nuevo.",
-                        onRetry = { uiState = "Lista" }
+                        onRetry = {
+                            uiState = "Lista"
+                            scope.launch {
+                                CiudadActivaRepository.refreshNotifications()
+                            }
+                        }
                     )
                 }
                 else -> {
+                    val unreadCount = CiudadActivaRepository.notifications.count { it.isUnread }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1049,7 +1233,7 @@ fun NotificationsScreen(navController: NavController) {
                     ) {
                         Text(text = "Hoy", style = Titulo16)
                         Text(
-                            text = "2 sin leer",
+                            text = "$unreadCount sin leer",
                             style = Texto12Semibold.copy(color = CaPrimaryText)
                         )
                     }
@@ -1064,6 +1248,14 @@ fun NotificationsScreen(navController: NavController) {
                                 .fillMaxWidth()
                                 .clickable {
                                     item.isUnread = false
+                                    val numId = item.id.toLongOrNull()
+                                    if (numId != null) {
+                                        scope.launch {
+                                            try {
+                                                ApiClient.apiService.markNotificationRead(numId)
+                                            } catch (_: Exception) { }
+                                        }
+                                    }
                                     navController.navigate(Screen.ReportDetail.createRoute(item.reportCode))
                                 }
                         ) {

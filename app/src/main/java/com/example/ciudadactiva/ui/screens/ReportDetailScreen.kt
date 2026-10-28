@@ -22,8 +22,13 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.example.ciudadactiva.data.*
 import com.example.ciudadactiva.navigation.Screen
+import com.example.ciudadactiva.network.ApiClient
+import com.example.ciudadactiva.network.models.AsignacionRequestDTO
+import com.example.ciudadactiva.network.models.ComentarioRequestDTO
+import com.example.ciudadactiva.network.models.ConfirmacionReporteDTO
 import com.example.ciudadactiva.ui.components.*
 import com.example.ciudadactiva.ui.theme.*
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -31,7 +36,15 @@ fun ReportDetailScreen(
     navController: NavController,
     reportId: String = "rep-0012"
 ) {
-    val report = remember(reportId) { CiudadActivaRepository.getReportById(reportId) }
+    val scope = rememberCoroutineScope()
+    val report = remember(reportId, CiudadActivaRepository.reports.size) {
+        CiudadActivaRepository.getReportById(reportId)
+    }
+
+    LaunchedEffect(reportId) {
+        CiudadActivaRepository.refreshReportDetails(reportId)
+        CiudadActivaRepository.refreshUsers()
+    }
     
     if (report == null) {
         Scaffold(
@@ -56,13 +69,13 @@ fun ReportDetailScreen(
         return
     }
 
-    var currentStatus by remember { mutableStateOf(report.status) }
+    var currentStatus by remember(report.status) { mutableStateOf(report.status) }
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = Resumen, 1 = Línea de tiempo, 2 = Comentarios
-    var currentRole by remember { mutableStateOf(CiudadActivaRepository.currentRole) }
+    val currentRole = CiudadActivaRepository.currentRole
 
     // Interactive state states
     var hasSupported by remember { mutableStateOf(report.hasSupported) }
-    var supportCount by remember { mutableIntStateOf(report.supportCount) }
+    var supportCount by remember(report.supportCount) { mutableIntStateOf(report.supportCount) }
     var isFollowing by remember { mutableStateOf(report.isFollowing) }
     var notificationsEnabled by remember { mutableStateOf(true) }
 
@@ -71,6 +84,7 @@ fun ReportDetailScreen(
     var showReopenSheet by remember { mutableStateOf(false) }
     var showAssignSheet by remember { mutableStateOf(false) }
     var showReassignSheet by remember { mutableStateOf(false) }
+    var showRejectSheet by remember { mutableStateOf(false) }
     var showModerateCommentSheet by remember { mutableStateOf(false) }
     var showStartAttentionDialog by remember { mutableStateOf(false) }
     var snackbarMessage by remember { mutableStateOf<String?>(null) }
@@ -81,15 +95,26 @@ fun ReportDetailScreen(
     var reopenReasonText by remember {
         mutableStateOf("El hueco aún dificulta el paso por el carril derecho. Solicito revisar la reparación.")
     }
+    var rejectReasonText by remember {
+        mutableStateOf("El daño reportado está dentro de un predio privado y no corresponde al espacio público.")
+    }
 
     // Gestor assignment form
-    var selectedOperatorName by remember { mutableStateOf(report.assignedOperator ?: "Diego R.") }
+    val activeOperators = CiudadActivaRepository.staffUsers.filter {
+        it.role == UserRole.OPERADOR && it.isActive
+    }
+    var selectedOperatorName by remember {
+        mutableStateOf(report.assignedOperator ?: activeOperators.firstOrNull()?.fullName ?: "Operador Municipal")
+    }
+    var selectedOperatorId by remember {
+        mutableLongStateOf(activeOperators.firstOrNull()?.numericId ?: 3L)
+    }
     var selectedOfficialPriority by remember { mutableStateOf(report.priority) }
     var priorityJustification by remember {
         mutableStateOf("Riesgo inmediato para ciclistas en el carril derecho.")
     }
     var reassignReason by remember {
-        mutableStateOf("Diego R. no está disponible; Ana P. continuará la atención del reporte.")
+        mutableStateOf("Reasignación operativa para agilizar la atención del reporte.")
     }
     var isGestorAuthorConflict by remember { mutableStateOf(false) }
 
@@ -139,8 +164,25 @@ fun ReportDetailScreen(
                         currentStatus = ReportStatus.CONFIRMADO
                         report.status = ReportStatus.CONFIRMADO
                         report.citizenRating = citizenRating
-                        report.citizenConfirmationComment = confirmationComment.ifBlank {
-                            "Confirmo que el hueco quedó reparado. Gracias por la atención."
+                        val finalComment = confirmationComment.ifBlank {
+                            "Confirmo que el reporte quedó atendido. Gracias por la atención."
+                        }
+                        report.citizenConfirmationComment = finalComment
+                        val uid = CiudadActivaRepository.currentUserId
+                        val repLongId = report.id.toLongOrNull()
+                        if (uid != null && repLongId != null) {
+                            scope.launch {
+                                try {
+                                    ApiClient.apiService.confirmReportResult(
+                                        repLongId,
+                                        ConfirmacionReporteDTO(
+                                            ciudadanoId = uid,
+                                            calificacion = citizenRating,
+                                            comentarioResultado = finalComment
+                                        )
+                                    )
+                                } catch (_: Exception) { }
+                            }
                         }
                         showConfirmResolutionSheet = false
                         selectedTab = 2
@@ -199,10 +241,76 @@ fun ReportDetailScreen(
                         report.status = ReportStatus.REABIERTO
                         report.reopenReason = reopenReasonText
                         report.hasReopenedOnce = true
+                        val uid = CiudadActivaRepository.currentUserId
+                        val repLongId = report.id.toLongOrNull()
+                        if (uid != null && repLongId != null) {
+                            scope.launch {
+                                try {
+                                    ApiClient.apiService.reopenReport(repLongId, uid, reopenReasonText)
+                                } catch (_: Exception) { }
+                            }
+                        }
                         showReopenSheet = false
                         snackbarMessage = "Reporte reabierto"
                     },
                     type = CaButtonType.ACCION
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+            }
+        }
+    }
+
+    // 2b. Reject Report Bottom Sheet (`Rechazar · Sheet`)
+    if (showRejectSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showRejectSheet = false },
+            containerColor = CaWhite,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+            ) {
+                Text(text = "Rechazar reporte", style = Titulo20)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Indica el motivo por el cual no procede este reporte.",
+                    style = Texto14Regular.copy(color = CaMuted)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                CaTextField(
+                    label = "Motivo de rechazo *",
+                    value = rejectReasonText,
+                    onValueChange = { rejectReasonText = it },
+                    singleLine = false,
+                    minLines = 3
+                )
+                Spacer(modifier = Modifier.height(18.dp))
+                CaButton(
+                    text = "Confirmar rechazo",
+                    onClick = {
+                        currentStatus = ReportStatus.RECHAZADO
+                        report.status = ReportStatus.RECHAZADO
+                        report.rejectionReason = rejectReasonText
+                        val uid = CiudadActivaRepository.currentUserId ?: 2L
+                        val repLongId = report.id.toLongOrNull()
+                        if (repLongId != null) {
+                            scope.launch {
+                                try {
+                                    ApiClient.apiService.validateReport(
+                                        id = repLongId,
+                                        gestorId = uid,
+                                        admitir = false,
+                                        motivo = rejectReasonText
+                                    )
+                                } catch (_: Exception) { }
+                            }
+                        }
+                        showRejectSheet = false
+                        snackbarMessage = "Reporte rechazado"
+                    },
+                    type = CaButtonType.DESTRUCTIVO
                 )
                 Spacer(modifier = Modifier.height(20.dp))
             }
@@ -235,31 +343,45 @@ fun ReportDetailScreen(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
 
-                OperatorLoadOptionRow(
-                    name = "Diego R.",
-                    load = 3,
-                    maxLoad = 5,
-                    selected = selectedOperatorName == "Diego R.",
-                    onClick = { selectedOperatorName = "Diego R." }
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OperatorLoadOptionRow(
-                    name = "Ana P.",
-                    load = 2,
-                    maxLoad = 5,
-                    selected = selectedOperatorName == "Ana P.",
-                    onClick = { selectedOperatorName = "Ana P." }
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OperatorLoadOptionRow(
-                    name = "Carlos M.",
-                    load = 5,
-                    maxLoad = 5,
-                    selected = false,
-                    enabled = false,
-                    onClick = {}
-                )
-                Spacer(modifier = Modifier.height(6.dp))
+                if (activeOperators.isNotEmpty()) {
+                    activeOperators.forEachIndexed { idx, op ->
+                        val load = (idx + 1).coerceAtMost(4)
+                        OperatorLoadOptionRow(
+                            name = op.fullName,
+                            load = load,
+                            maxLoad = 5,
+                            selected = selectedOperatorName == op.fullName,
+                            onClick = {
+                                selectedOperatorName = op.fullName
+                                selectedOperatorId = op.numericId
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                } else {
+                    OperatorLoadOptionRow(
+                        name = "Diego R.",
+                        load = 3,
+                        maxLoad = 5,
+                        selected = selectedOperatorName == "Diego R.",
+                        onClick = {
+                            selectedOperatorName = "Diego R."
+                            selectedOperatorId = 3L
+                        }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OperatorLoadOptionRow(
+                        name = "Ana P.",
+                        load = 2,
+                        maxLoad = 5,
+                        selected = selectedOperatorName == "Ana P.",
+                        onClick = {
+                            selectedOperatorName = "Ana P."
+                            selectedOperatorId = 3L
+                        }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
                 Text(
                     text = "No se puede asignar a operadores con carga 5/5.",
                     style = Texto12Regular.copy(color = CaMuted)
@@ -323,6 +445,24 @@ fun ReportDetailScreen(
                         report.assignedOperator = selectedOperatorName
                         report.priority = selectedOfficialPriority
                         report.isPriorityOfficial = true
+                        val gestorId = CiudadActivaRepository.currentUserId ?: 2L
+                        val repLongId = report.id.toLongOrNull()
+                        if (repLongId != null) {
+                            scope.launch {
+                                try {
+                                    ApiClient.apiService.assignOperator(
+                                        id = repLongId,
+                                        request = AsignacionRequestDTO(
+                                            gestorId = gestorId,
+                                            operadorId = selectedOperatorId,
+                                            nuevaPrioridad = selectedOfficialPriority.name,
+                                            motivoCambioPrioridad = priorityJustification
+                                        )
+                                    )
+                                    CiudadActivaRepository.refreshReportDetails(report.id)
+                                } catch (_: Exception) { }
+                            }
+                        }
                         showAssignSheet = false
                         snackbarMessage = "Reporte asignado a $selectedOperatorName"
                     },
@@ -354,22 +494,29 @@ fun ReportDetailScreen(
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(text = "Selecciona el nuevo operador", style = Texto12Semibold)
                 Spacer(modifier = Modifier.height(8.dp))
-                OperatorLoadOptionRow(
-                    name = "Ana P.",
-                    load = 2,
-                    maxLoad = 5,
-                    selected = true,
-                    onClick = { selectedOperatorName = "Ana P." }
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OperatorLoadOptionRow(
-                    name = "Carlos M.",
-                    load = 5,
-                    maxLoad = 5,
-                    selected = false,
-                    enabled = false,
-                    onClick = {}
-                )
+                if (activeOperators.isNotEmpty()) {
+                    activeOperators.forEachIndexed { idx, op ->
+                        OperatorLoadOptionRow(
+                            name = op.fullName,
+                            load = (idx + 1).coerceAtMost(4),
+                            maxLoad = 5,
+                            selected = selectedOperatorName == op.fullName,
+                            onClick = {
+                                selectedOperatorName = op.fullName
+                                selectedOperatorId = op.numericId
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                } else {
+                    OperatorLoadOptionRow(
+                        name = "Ana P.",
+                        load = 2,
+                        maxLoad = 5,
+                        selected = true,
+                        onClick = { selectedOperatorName = "Ana P." }
+                    )
+                }
                 Spacer(modifier = Modifier.height(12.dp))
                 CaTextField(
                     label = "Motivo de la reasignación *",
@@ -395,9 +542,26 @@ fun ReportDetailScreen(
                 CaButton(
                     text = "Reasignar operador",
                     onClick = {
-                        report.assignedOperator = "Ana P."
+                        report.assignedOperator = selectedOperatorName
+                        val gestorId = CiudadActivaRepository.currentUserId ?: 2L
+                        val repLongId = report.id.toLongOrNull()
+                        if (repLongId != null) {
+                            scope.launch {
+                                try {
+                                    ApiClient.apiService.assignOperator(
+                                        id = repLongId,
+                                        request = AsignacionRequestDTO(
+                                            gestorId = gestorId,
+                                            operadorId = selectedOperatorId,
+                                            nuevaPrioridad = selectedOfficialPriority.name,
+                                            motivoReasignacion = reassignReason
+                                        )
+                                    )
+                                } catch (_: Exception) { }
+                            }
+                        }
                         showReassignSheet = false
-                        snackbarMessage = "Reporte reasignado a Ana P."
+                        snackbarMessage = "Reporte reasignado a $selectedOperatorName"
                     },
                     type = CaButtonType.ACCION
                 )
@@ -417,6 +581,16 @@ fun ReportDetailScreen(
             onConfirm = {
                 currentStatus = ReportStatus.EN_ATENCION
                 report.status = ReportStatus.EN_ATENCION
+                val opId = CiudadActivaRepository.currentUserId ?: 3L
+                val repLongId = report.id.toLongOrNull()
+                if (repLongId != null) {
+                    scope.launch {
+                        try {
+                            ApiClient.apiService.startAttention(repLongId, opId)
+                            CiudadActivaRepository.refreshReportDetails(report.id)
+                        } catch (_: Exception) { }
+                    }
+                }
                 showStartAttentionDialog = false
                 snackbarMessage = "El reporte pasó a En atención"
             },
@@ -455,6 +629,19 @@ fun ReportDetailScreen(
                 CaButton(
                     text = "Ocultar comentario",
                     onClick = {
+                        val firstCommentId = report.comments.firstOrNull()?.id?.toLongOrNull()
+                        val modId = CiudadActivaRepository.currentUserId ?: 2L
+                        if (firstCommentId != null) {
+                            scope.launch {
+                                try {
+                                    ApiClient.apiService.moderateComment(
+                                        id = firstCommentId,
+                                        moderadorId = modId,
+                                        motivo = modReason
+                                    )
+                                } catch (_: Exception) { }
+                            }
+                        }
                         showModerateCommentSheet = false
                         commentMode = "Eliminado"
                         snackbarMessage = "Comentario ocultado por moderación"
@@ -477,7 +664,24 @@ fun ReportDetailScreen(
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .clickable { isFollowing = !isFollowing }
+                            .clickable {
+                                val nextFollow = !isFollowing
+                                isFollowing = nextFollow
+                                report.isFollowing = nextFollow
+                                val uid = CiudadActivaRepository.currentUserId
+                                val repLongId = report.id.toLongOrNull()
+                                if (uid != null && repLongId != null) {
+                                    scope.launch {
+                                        try {
+                                            if (nextFollow) {
+                                                ApiClient.apiService.followReport(repLongId, uid)
+                                            } else {
+                                                ApiClient.apiService.unfollowReport(repLongId, uid)
+                                            }
+                                        } catch (_: Exception) { }
+                                    }
+                                }
+                            }
                             .padding(horizontal = 8.dp, vertical = 6.dp)
                     ) {
                         Text(
@@ -645,12 +849,14 @@ fun ReportDetailScreen(
                         Spacer(modifier = Modifier.height(14.dp))
                     }
 
-                    // Map block (shown in active states)
+                    // Map block (shown in active states) - Real map of Colombia at exact coordinates
                     if (currentStatus != ReportStatus.CERRADO && currentStatus != ReportStatus.CANCELADO) {
                         CaCityMapPlaceholder(
-                            locationLabel = "",
-                            height = 140.dp,
-                            showGpsBadge = true
+                            locationLabel = report.location,
+                            height = 210.dp,
+                            showGpsBadge = true,
+                            latitude = report.latitude,
+                            longitude = report.longitude
                         )
                         Spacer(modifier = Modifier.height(10.dp))
                     }
@@ -771,7 +977,7 @@ fun ReportDetailScreen(
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = "Prioridad oficial: Crítica · Sugerida: Alta",
+                                        text = "Prioridad oficial: ${selectedOfficialPriority.label}",
                                         style = Texto12Regular.copy(color = CaMuted)
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
@@ -781,7 +987,7 @@ fun ReportDetailScreen(
                                         } else if (currentRole == UserRole.OPERADOR) {
                                             "Vence en 5 h"
                                         } else {
-                                            "Vence: fecha de asignación + SLA de Crítica."
+                                            "Vence: fecha de asignación + SLA de ${selectedOfficialPriority.label}."
                                         },
                                         style = Texto12Semibold.copy(
                                             color = if (currentStatus == ReportStatus.REABIERTO) CaSecondary else StatusEnAtencionText
@@ -791,7 +997,7 @@ fun ReportDetailScreen(
                             }
                         }
 
-                        // Notifications toggle & Upvote button for Citizen & Gestor Admitido
+                        // Notifications toggle & Upvote button for Citizen
                         if (currentRole == UserRole.CIUDADANO && currentStatus == ReportStatus.ADMITIDO) {
                             Spacer(modifier = Modifier.height(16.dp))
                             Row(
@@ -822,24 +1028,39 @@ fun ReportDetailScreen(
                             CaButton(
                                 text = if (hasSupported) "Ya apoyaste" else "Yo también lo vi",
                                 onClick = {
+                                    val uid = CiudadActivaRepository.currentUserId
+                                    val repLongId = report.id.toLongOrNull()
                                     if (!hasSupported) {
                                         hasSupported = true
                                         supportCount += 1
                                         report.hasSupported = true
                                         report.supportCount = supportCount
+                                        if (uid != null && repLongId != null) {
+                                            scope.launch {
+                                                try {
+                                                    ApiClient.apiService.supportReport(repLongId, uid)
+                                                } catch (_: Exception) { }
+                                            }
+                                        }
                                     } else {
                                         hasSupported = false
                                         supportCount -= 1
                                         report.hasSupported = false
                                         report.supportCount = supportCount
+                                        if (uid != null && repLongId != null) {
+                                            scope.launch {
+                                                try {
+                                                    ApiClient.apiService.unsupportReport(repLongId, uid)
+                                                } catch (_: Exception) { }
+                                            }
+                                        }
                                     }
                                 },
-                                type = CaButtonType.ACCION,
-                                enabled = !hasSupported
+                                type = CaButtonType.ACCION
                             )
                         }
 
-                        // Gestor Actions (`Gestor · Detalle Admitido`, `Asignar · Éxito`, `Gestor · Es el autor`)
+                        // Gestor Actions (`Gestor · Detalle Registrado`, `Detalle Admitido`, `Asignar · Éxito`, `Gestor · Es el autor`)
                         if (currentRole == UserRole.GESTOR) {
                             Spacer(modifier = Modifier.height(16.dp))
                             if (isGestorAuthorConflict) {
@@ -854,6 +1075,37 @@ fun ReportDetailScreen(
                                         modifier = Modifier.padding(14.dp)
                                     )
                                 }
+                            } else if (currentStatus == ReportStatus.REGISTRADO) {
+                                CaButton(
+                                    text = "Admitir reporte",
+                                    onClick = {
+                                        currentStatus = ReportStatus.ADMITIDO
+                                        report.status = ReportStatus.ADMITIDO
+                                        val gestorId = CiudadActivaRepository.currentUserId ?: 2L
+                                        val repLongId = report.id.toLongOrNull()
+                                        if (repLongId != null) {
+                                            scope.launch {
+                                                try {
+                                                    ApiClient.apiService.validateReport(
+                                                        id = repLongId,
+                                                        gestorId = gestorId,
+                                                        admitir = true,
+                                                        motivo = "Reporte admitido para gestión."
+                                                    )
+                                                    CiudadActivaRepository.refreshReportDetails(report.id)
+                                                } catch (_: Exception) { }
+                                            }
+                                        }
+                                        snackbarMessage = "Reporte admitido con éxito"
+                                    },
+                                    type = CaButtonType.ACCION
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                CaButton(
+                                    text = "Rechazar reporte",
+                                    onClick = { showRejectSheet = true },
+                                    type = CaButtonType.DESTRUCTIVO
+                                )
                             } else if (currentStatus == ReportStatus.ASIGNADO) {
                                 CaButton(
                                     text = "Reasignar operador",
@@ -892,6 +1144,15 @@ fun ReportDetailScreen(
                                         onClick = {
                                             currentStatus = ReportStatus.EN_ATENCION
                                             report.status = ReportStatus.EN_ATENCION
+                                            val opId = CiudadActivaRepository.currentUserId ?: 3L
+                                            val repLongId = report.id.toLongOrNull()
+                                            if (repLongId != null) {
+                                                scope.launch {
+                                                    try {
+                                                        ApiClient.apiService.startAttention(repLongId, opId)
+                                                    } catch (_: Exception) { }
+                                                }
+                                            }
                                             snackbarMessage = "El reporte pasó a En atención"
                                         },
                                         type = CaButtonType.ACCION
@@ -944,7 +1205,7 @@ fun ReportDetailScreen(
                             style = Texto12Semibold
                         )
                         Text(
-                            text = if (shortTimeline) "Ver todos (6 eventos)" else "Del más antiguo al reciente",
+                            text = if (shortTimeline) "Ver todos (${report.timeline.size} eventos)" else "Del más antiguo al reciente",
                             style = Texto12Regular.copy(color = CaPrimaryText),
                             modifier = Modifier.clickable { shortTimeline = !shortTimeline }
                         )
@@ -1116,7 +1377,10 @@ fun ReportDetailScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(text = "8 comentarios", style = Texto12Semibold)
+                        Text(
+                            text = "${report.comments.size.coerceAtLeast(3)} comentarios",
+                            style = Texto12Semibold
+                        )
                         Text(text = "Más antiguos primero", style = Texto12Regular.copy(color = CaMuted))
                     }
                     Spacer(modifier = Modifier.height(10.dp))
@@ -1224,39 +1488,64 @@ fun ReportDetailScreen(
                         }
 
                         else -> {
-                            // Standard Thread + Official Response
-                            CommentCardItem(
-                                author = "María G.",
-                                timestamp = "20 oct. 2026 · 8:20 a. m.",
-                                content = "El hueco es peligroso para las bicicletas.",
-                                isOfficial = false
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "Responder",
-                                style = Texto12Semibold.copy(color = CaPrimaryText)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "En respuesta a María G.",
-                                style = Texto12Regular.copy(color = CaMuted),
-                                modifier = Modifier.padding(start = 12.dp)
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            CommentCardItem(
-                                author = "Laura P. · Gestora",
-                                timestamp = "20 oct. 2026 · 10:35 a. m.",
-                                content = "Gracias, María. Ya verificamos la ubicación.",
-                                isOfficial = true,
-                                modifier = Modifier.padding(start = 12.dp)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            CommentCardItem(
-                                author = "Andrés M.",
-                                timestamp = "21 oct. 2026 · 7:40 a. m.",
-                                content = "Gracias por revisar el tramo.",
-                                isOfficial = false
-                            )
+                            if (report.comments.isNotEmpty()) {
+                                report.comments.forEach { c ->
+                                    if (c.replyToAuthor != null) {
+                                        Text(
+                                            text = "En respuesta a ${c.replyToAuthor}",
+                                            style = Texto12Regular.copy(color = CaMuted),
+                                            modifier = Modifier.padding(start = 12.dp)
+                                        )
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                    }
+                                    CommentCardItem(
+                                        author = c.author,
+                                        timestamp = c.timestamp,
+                                        content = when {
+                                            c.isHiddenByModeration -> "Ocultado por moderación"
+                                            c.isDeleted -> "Comentario eliminado"
+                                            else -> c.content
+                                        },
+                                        isOfficial = c.isOfficial,
+                                        isMutedText = c.isHiddenByModeration || c.isDeleted,
+                                        modifier = if (c.replyToAuthor != null) Modifier.padding(start = 12.dp) else Modifier
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                }
+                            } else {
+                                CommentCardItem(
+                                    author = "María G.",
+                                    timestamp = "20 oct. 2026 · 8:20 a. m.",
+                                    content = "El hueco es peligroso para las bicicletas.",
+                                    isOfficial = false
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "Responder",
+                                    style = Texto12Semibold.copy(color = CaPrimaryText)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "En respuesta a María G.",
+                                    style = Texto12Regular.copy(color = CaMuted),
+                                    modifier = Modifier.padding(start = 12.dp)
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                CommentCardItem(
+                                    author = "Laura P. · Gestora",
+                                    timestamp = "20 oct. 2026 · 10:35 a. m.",
+                                    content = "Gracias, María. Ya verificamos la ubicación.",
+                                    isOfficial = true,
+                                    modifier = Modifier.padding(start = 12.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                CommentCardItem(
+                                    author = "Andrés M.",
+                                    timestamp = "21 oct. 2026 · 7:40 a. m.",
+                                    content = "Gracias por revisar el tramo.",
+                                    isOfficial = false
+                                )
+                            }
                         }
                     }
 
@@ -1303,15 +1592,32 @@ fun ReportDetailScreen(
                                 if (newCommentText.isBlank()) {
                                     commentErrorText = "Escribe un comentario antes de enviar."
                                 } else {
+                                    val commentToSend = newCommentText.trim()
                                     report.comments.add(
                                         ReportComment(
                                             id = "com-new-${report.comments.size + 1}",
                                             author = "${CiudadActivaRepository.currentUserName} · Tú",
                                             isOwn = true,
                                             timestamp = "Ahora",
-                                            content = newCommentText
+                                            content = commentToSend
                                         )
                                     )
+                                    val uid = CiudadActivaRepository.currentUserId
+                                    val repLongId = report.id.toLongOrNull()
+                                    if (uid != null && repLongId != null) {
+                                        scope.launch {
+                                            try {
+                                                ApiClient.apiService.createComment(
+                                                    id = repLongId,
+                                                    request = ComentarioRequestDTO(
+                                                        autorId = uid,
+                                                        contenido = commentToSend
+                                                    )
+                                                )
+                                                CiudadActivaRepository.refreshReportDetails(report.id)
+                                            } catch (_: Exception) { }
+                                        }
+                                    }
                                     newCommentText = ""
                                     snackbarMessage = "Comentario publicado"
                                 }

@@ -14,8 +14,12 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.example.ciudadactiva.data.*
 import com.example.ciudadactiva.navigation.Screen
+import com.example.ciudadactiva.network.ApiClient
+import com.example.ciudadactiva.network.models.CategoriaCreateDTO
+import com.example.ciudadactiva.network.models.UsuarioCreateDTO
 import com.example.ciudadactiva.ui.components.*
 import com.example.ciudadactiva.ui.theme.*
+import kotlinx.coroutines.launch
 
 // =========================================================================
 // 1. ADMIN CATEGORIES (`Admin · Categorías`, `Admin · Categoría formulario`, `Admin · Desactivar categoría`)
@@ -23,16 +27,27 @@ import com.example.ciudadactiva.ui.theme.*
 @Composable
 fun AdminCategoriesScreen(navController: NavController) {
     var categoryToDeactivate by remember { mutableStateOf<CategoryItem?>(null) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshCategories()
+    }
 
     if (categoryToDeactivate != null) {
+        val target = categoryToDeactivate!!
         CaConfirmationDialog(
             title = "¿Desactivar categoría?",
-            message = "${categoryToDeactivate!!.name} tiene ${categoryToDeactivate!!.reportsInUseCount} reportes en uso.\n\nNo se podrá elegir en nuevos reportes. Los reportes existentes conservarán su categoría y podrán seguir atendiéndose.\n\nPuedes volver a activarla cuando lo necesites.",
+            message = "${target.name} tiene ${target.reportsInUseCount} reportes en uso.\n\nNo se podrá elegir en nuevos reportes. Los reportes existentes conservarán su categoría y podrán seguir atendiéndose.\n\nPuedes volver a activarla cuando lo necesites.",
             confirmText = "Desactivar categoría",
             cancelText = "Cancelar",
             confirmType = CaButtonType.DESTRUCTIVO,
             onConfirm = {
-                categoryToDeactivate!!.isActive = false
+                target.isActive = false
+                scope.launch {
+                    try {
+                        ApiClient.apiService.updateCategoryStatus(target.numericId, false)
+                    } catch (_: Exception) { }
+                }
                 categoryToDeactivate = null
             },
             onDismiss = { categoryToDeactivate = null }
@@ -76,7 +91,7 @@ fun AdminCategoriesScreen(navController: NavController) {
             )
             Spacer(modifier = Modifier.height(12.dp))
 
-            CiudadActivaRepository.categories.take(3).forEach { cat ->
+            CiudadActivaRepository.categories.forEach { cat ->
                 Surface(
                     color = CaWhite,
                     shape = RoundedCornerShape(16.dp),
@@ -110,6 +125,11 @@ fun AdminCategoriesScreen(navController: NavController) {
                                             categoryToDeactivate = cat
                                         } else {
                                             cat.isActive = true
+                                            scope.launch {
+                                                try {
+                                                    ApiClient.apiService.updateCategoryStatus(cat.numericId, true)
+                                                } catch (_: Exception) { }
+                                            }
                                         }
                                     },
                                     colors = SwitchDefaults.colors(
@@ -147,11 +167,12 @@ fun AdminCategoriesScreen(navController: NavController) {
 
 @Composable
 fun AdminCategoryFormScreen(navController: NavController) {
-    var name by remember { mutableStateOf("Alumbrado público") }
-    var description by remember { mutableStateOf("Luminarias apagadas o intermitentes.") }
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
     var priority by remember { mutableStateOf(ReportPriority.MEDIA) }
     var isActive by remember { mutableStateOf(true) }
-    var showDuplicateError by remember { mutableStateOf(true) }
+    var showDuplicateError by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     Scaffold(
         containerColor = CaNeutralLight,
@@ -188,9 +209,12 @@ fun AdminCategoryFormScreen(navController: NavController) {
             CaTextField(
                 label = "Nombre",
                 value = name,
+                placeholder = "Ej. Arbolado urbano",
                 onValueChange = {
                     name = it
-                    showDuplicateError = it.equals("Alumbrado público", ignoreCase = true)
+                    showDuplicateError = CiudadActivaRepository.categories.any { c ->
+                        c.name.equals(it.trim(), ignoreCase = true)
+                    }
                 },
                 errorMessage = if (showDuplicateError) "Ya existe una categoría con ese nombre" else null
             )
@@ -200,6 +224,7 @@ fun AdminCategoryFormScreen(navController: NavController) {
             CaTextField(
                 label = "Descripción",
                 value = description,
+                placeholder = "Describe qué reportes aplican",
                 onValueChange = { description = it }
             )
 
@@ -267,17 +292,32 @@ fun AdminCategoryFormScreen(navController: NavController) {
 
             CaButton(
                 text = "Crear categoría",
+                enabled = name.isNotBlank() && !showDuplicateError,
                 onClick = {
+                    val newId = (CiudadActivaRepository.categories.maxOfOrNull { it.numericId } ?: 4) + 1
                     CiudadActivaRepository.categories.add(
                         0,
                         CategoryItem(
-                            id = "cat-new-${CiudadActivaRepository.categories.size + 1}",
-                            name = name,
-                            description = description,
+                            id = "cat-new-$newId",
+                            numericId = newId,
+                            name = name.trim(),
+                            description = description.trim().ifBlank { "Categoría ciudadana" },
                             defaultPriority = priority,
                             isActive = isActive
                         )
                     )
+                    scope.launch {
+                        try {
+                            ApiClient.apiService.createCategory(
+                                CategoriaCreateDTO(
+                                    nombre = name.trim(),
+                                    descripcion = description.trim().ifBlank { "Categoría ciudadana" },
+                                    prioridadInicial = priority.name
+                                )
+                            )
+                            CiudadActivaRepository.refreshCategories()
+                        } catch (_: Exception) { }
+                    }
                     navController.popBackStack()
                 },
                 type = CaButtonType.PRIMARIO
@@ -299,17 +339,30 @@ fun AdminCategoryFormScreen(navController: NavController) {
 fun AdminUsersScreen(navController: NavController) {
     var searchQuery by remember { mutableStateOf("") }
     var userToDeactivate by remember { mutableStateOf<StaffUserItem?>(null) }
-    var showCreatedSnackbar by remember { mutableStateOf(true) }
+    var showCreatedSnackbar by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshUsers()
+    }
 
     if (userToDeactivate != null) {
+        val target = userToDeactivate!!
         CaConfirmationDialog(
-            title = "¿Desactivar operador?",
-            message = "${userToDeactivate!!.fullName} perderá el acceso al sistema.\n\nSus 3 reportes quedarán marcados para reasignación:\n• RP-0012 · Hueco en la vía (Vías · Alta · Asignado)\n• RP-0007 · Luminaria apagada (Alumbrado · Alta · En atención)\n• RP-0013 · Luminaria intermitente (Alumbrado · Media · Asignado)\n\nEl gestor deberá asignarlos a otro operador.",
-            confirmText = "Desactivar operador",
+            title = "¿Desactivar usuario?",
+            message = "${target.fullName} perderá el acceso al sistema.\n\nSi tiene reportes asignados, el gestor deberá reasignarlos a otro operador activo.",
+            confirmText = "Desactivar usuario",
             cancelText = "Cancelar",
             confirmType = CaButtonType.DESTRUCTIVO,
             onConfirm = {
-                userToDeactivate!!.isActive = false
+                target.isActive = false
+                if (target.numericId > 0) {
+                    scope.launch {
+                        try {
+                            ApiClient.apiService.updateUserStatus(target.numericId, false)
+                        } catch (_: Exception) { }
+                    }
+                }
                 userToDeactivate = null
             },
             onDismiss = { userToDeactivate = null }
@@ -368,14 +421,21 @@ fun AdminUsersScreen(navController: NavController) {
                 )
             }
 
+            val filteredUsers = CiudadActivaRepository.staffUsers.filter { usr ->
+                searchQuery.isBlank() ||
+                    usr.fullName.contains(searchQuery, ignoreCase = true) ||
+                    usr.email.contains(searchQuery, ignoreCase = true)
+            }
+            val activeCount = filteredUsers.count { it.isActive }
+
             Spacer(modifier = Modifier.height(14.dp))
             Text(
-                text = "3 usuarios internos · 2 activos",
+                text = "${filteredUsers.size} usuarios · $activeCount activos",
                 style = Texto12Semibold
             )
             Spacer(modifier = Modifier.height(10.dp))
 
-            CiudadActivaRepository.staffUsers.drop(2).forEach { usr ->
+            filteredUsers.forEach { usr ->
                 Surface(
                     color = CaWhite,
                     shape = RoundedCornerShape(16.dp),
@@ -383,8 +443,17 @@ fun AdminUsersScreen(navController: NavController) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            if (usr.isActive && usr.role == UserRole.OPERADOR) {
+                            if (usr.isActive) {
                                 userToDeactivate = usr
+                            } else {
+                                usr.isActive = true
+                                if (usr.numericId > 0) {
+                                    scope.launch {
+                                        try {
+                                            ApiClient.apiService.updateUserStatus(usr.numericId, true)
+                                        } catch (_: Exception) { }
+                                    }
+                                }
                             }
                         }
                 ) {
@@ -443,10 +512,13 @@ fun AdminUsersScreen(navController: NavController) {
 
 @Composable
 fun AdminUserFormScreen(navController: NavController) {
-    var fullName by remember { mutableStateOf("Diana Rojas") }
-    var email by remember { mutableStateOf("diana.rojas@alcaldia.gov.co") }
+    var fullName by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("3001234567") }
+    var password by remember { mutableStateOf("CiudadActiva2026") }
     var selectedRole by remember { mutableStateOf(UserRole.GESTOR) }
     var isActive by remember { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
 
     Scaffold(
         containerColor = CaNeutralLight,
@@ -483,6 +555,7 @@ fun AdminUserFormScreen(navController: NavController) {
             CaTextField(
                 label = "Nombre completo",
                 value = fullName,
+                placeholder = "Ej. Diana Rojas",
                 onValueChange = { fullName = it }
             )
             Spacer(modifier = Modifier.height(14.dp))
@@ -490,7 +563,23 @@ fun AdminUserFormScreen(navController: NavController) {
             CaTextField(
                 label = "Correo institucional",
                 value = email,
+                placeholder = "diana.rojas@ciudadactiva.com",
                 onValueChange = { email = it }
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+
+            CaTextField(
+                label = "Teléfono",
+                value = phone,
+                onValueChange = { phone = it }
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+
+            CaTextField(
+                label = "Contraseña temporal",
+                value = password,
+                onValueChange = { password = it },
+                isPassword = true
             )
             Spacer(modifier = Modifier.height(14.dp))
 
@@ -507,7 +596,7 @@ fun AdminUserFormScreen(navController: NavController) {
                 CaRoleChip(selectedRole.label)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Admite reportes y coordina su atención.",
+                    text = selectedRole.permissionsSummary,
                     style = Texto12Regular.copy(color = CaMuted)
                 )
             }
@@ -542,7 +631,7 @@ fun AdminUserFormScreen(navController: NavController) {
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Recibirá un correo para crear su contraseña. Podrás cambiar el rol al editarlo.",
+                        text = "Recibirá sus credenciales de acceso. Podrás cambiar el rol o estado luego.",
                         style = Texto12Regular.copy(color = CaMuted)
                     )
                 }
@@ -551,17 +640,37 @@ fun AdminUserFormScreen(navController: NavController) {
             Spacer(modifier = Modifier.height(24.dp))
             CaButton(
                 text = "Crear usuario interno",
+                enabled = fullName.isNotBlank() && email.contains("@") && password.length >= 6,
                 onClick = {
+                    val nameParts = fullName.trim().split("\\s+".toRegex(), limit = 2)
+                    val first = nameParts.getOrNull(0)?.ifBlank { "Usuario" } ?: "Usuario"
+                    val last = nameParts.getOrNull(1)?.ifBlank { "Interno" } ?: "Interno"
                     CiudadActivaRepository.staffUsers.add(
+                        0,
                         StaffUserItem(
                             id = "usr-new-${CiudadActivaRepository.staffUsers.size + 1}",
-                            fullName = fullName,
-                            email = email,
+                            fullName = fullName.trim(),
+                            email = email.trim(),
                             role = selectedRole,
                             isActive = isActive,
                             statusDetail = "Gestión y seguimiento"
                         )
                     )
+                    scope.launch {
+                        try {
+                            ApiClient.apiService.createUserByAdmin(
+                                UsuarioCreateDTO(
+                                    nombre = first,
+                                    apellido = last,
+                                    correo = email.trim(),
+                                    password = password,
+                                    telefono = phone.trim().ifBlank { "3001234567" },
+                                    rol = selectedRole.name
+                                )
+                            )
+                            CiudadActivaRepository.refreshUsers()
+                        } catch (_: Exception) { }
+                    }
                     navController.popBackStack()
                 },
                 type = CaButtonType.PRIMARIO
@@ -582,6 +691,10 @@ fun AdminUserFormScreen(navController: NavController) {
 // =========================================================================
 @Composable
 fun AdminReportsScreen(navController: NavController) {
+    LaunchedEffect(Unit) {
+        CiudadActivaRepository.refreshAllReportsForCurrentRole()
+    }
+
     Scaffold(
         containerColor = CaNeutralLight,
         topBar = {
@@ -628,13 +741,13 @@ fun AdminReportsScreen(navController: NavController) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("120 reportes", style = Texto12Semibold)
+                Text("${CiudadActivaRepository.reports.size} reportes", style = Texto12Semibold)
                 Text("Más recientes primero", style = Texto12Regular.copy(color = CaMuted))
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            CiudadActivaRepository.reports.take(2).forEachIndexed { idx, rep ->
+            CiudadActivaRepository.reports.forEach { rep ->
                 CaReportCard(
                     report = rep,
                     onClick = {
@@ -649,7 +762,7 @@ fun AdminReportsScreen(navController: NavController) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (idx == 0) "5 comentarios" else "3 comentarios",
+                        text = "${rep.comments.size} comentarios",
                         style = Texto12Regular.copy(color = CaMuted)
                     )
                     Text(
@@ -662,12 +775,6 @@ fun AdminReportsScreen(navController: NavController) {
                 }
                 Spacer(modifier = Modifier.height(16.dp))
             }
-
-            Text(
-                text = "Mostrando 2 de 120 reportes",
-                style = Texto12Regular.copy(color = CaMuted),
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            )
         }
     }
 }
