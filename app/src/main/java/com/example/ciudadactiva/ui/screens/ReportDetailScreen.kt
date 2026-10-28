@@ -119,7 +119,6 @@ fun ReportDetailScreen(
     var isGestorAuthorConflict by remember { mutableStateOf(false) }
 
     // Comments state
-    var commentMode by remember { mutableStateOf("Hilo") } // Hilo, Propio, Eliminado, Compositor, Límite, Solo lectura
     var newCommentText by remember { mutableStateOf("") }
     var commentErrorText by remember { mutableStateOf<String?>(null) }
 
@@ -639,11 +638,11 @@ fun ReportDetailScreen(
                                         moderadorId = modId,
                                         motivo = modReason
                                     )
+                                    CiudadActivaRepository.refreshReportDetails(report.id)
                                 } catch (_: Exception) { }
                             }
                         }
                         showModerateCommentSheet = false
-                        commentMode = "Eliminado"
                         snackbarMessage = "Comentario ocultado por moderación"
                     },
                     type = CaButtonType.DESTRUCTIVO
@@ -1333,35 +1332,8 @@ fun ReportDetailScreen(
 
                 2 -> {
                     // =====================================================
-                    // TAB 2: COMENTARIOS (`Comentarios · Hilo`, `Propio`, `Eliminado y oculto`, `Compositor`, Validations)
+                    // TAB 2: COMENTARIOS
                     // =====================================================
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        listOf("Hilo", "Propio", "Eliminado", "Compositor", "Límite", "Solo lectura").forEach { m ->
-                            val selected = commentMode == m
-                            Surface(
-                                color = if (selected) StatusAdmitidoBg else CaWhite,
-                                shape = RoundedCornerShape(999.dp),
-                                border = BorderStroke(1.dp, if (selected) CaPrimaryText else CaBorder),
-                                modifier = Modifier.clickable { commentMode = m }
-                            ) {
-                                Text(
-                                    text = m,
-                                    style = Texto12Semibold.copy(
-                                        color = if (selected) StatusAdmitidoText else CaMuted
-                                    ),
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
                     if (currentStatus == ReportStatus.CONFIRMADO) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -1378,14 +1350,14 @@ fun ReportDetailScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = "${report.comments.size.coerceAtLeast(3)} comentarios",
+                            text = "${report.comments.size} comentarios",
                             style = Texto12Semibold
                         )
                         Text(text = "Más antiguos primero", style = Texto12Regular.copy(color = CaMuted))
                     }
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    if (commentMode == "Solo lectura" || currentStatus == ReportStatus.CONFIRMADO) {
+                    if (currentStatus == ReportStatus.CONFIRMADO) {
                         Surface(
                             color = CaWhite,
                             shape = RoundedCornerShape(14.dp),
@@ -1404,169 +1376,48 @@ fun ReportDetailScreen(
                         Spacer(modifier = Modifier.height(12.dp))
                     }
 
-                    when (commentMode) {
-                        "Propio" -> {
-                            CommentCardItem(
-                                author = "María G. · Tú",
-                                timestamp = "20 oct. 2026 · 10:42 a. m.",
-                                content = "También afecta a quienes vamos en bicicleta.",
-                                isOfficial = false
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
+                    if (report.comments.isNotEmpty()) {
+                        report.comments.forEach { c ->
+                            if (c.replyToAuthor != null) {
                                 Text(
-                                    text = "Editar",
-                                    style = Texto14Semibold.copy(color = CaPrimaryText)
-                                )
-                                Surface(
-                                    color = CaSecondary,
-                                    shape = RoundedCornerShape(999.dp)
-                                ) {
-                                    Text(
-                                        text = "Eliminar",
-                                        style = Texto12Semibold.copy(color = CaWhite),
-                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
-                                    )
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Puedes editar 12 min más",
-                                style = Texto12Regular.copy(color = CaMuted)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            CommentCardItem(
-                                author = "María G. · Tú",
-                                timestamp = "20 oct. 2026 · 10:46 a. m. · editado",
-                                content = "El hueco está en el carril derecho, junto al paradero.",
-                                isOfficial = false
-                            )
-                        }
-
-                        "Eliminado" -> {
-                            CommentCardItem(
-                                author = "Andrés M.",
-                                timestamp = "20 oct. 2026 · 8:50 a. m.",
-                                content = "Comentario eliminado",
-                                isOfficial = false,
-                                isMutedText = true
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "En respuesta a Andrés M.",
-                                style = Texto12Regular.copy(color = CaMuted),
-                                modifier = Modifier.padding(start = 12.dp)
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            CommentCardItem(
-                                author = "Laura P. · Gestora",
-                                timestamp = "20 oct. 2026 · 10:35 a. m.",
-                                content = "La visita al tramo ya quedó programada.",
-                                isOfficial = true,
-                                modifier = Modifier.padding(start = 12.dp)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            CommentCardItem(
-                                author = "María G. · Tú",
-                                timestamp = "20 oct. 2026 · 10:42 a. m.",
-                                content = "Ocultado por moderación",
-                                isOfficial = false,
-                                isMutedText = true
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "Motivo: contiene datos personales de un tercero.",
-                                style = Texto12Semibold.copy(color = CaSecondary)
-                            )
-                            Text(
-                                text = "Solo tú puedes ver este motivo. El contenido no es público.",
-                                style = Texto12Regular.copy(color = CaMuted)
-                            )
-                        }
-
-                        else -> {
-                            if (report.comments.isNotEmpty()) {
-                                report.comments.forEach { c ->
-                                    if (c.replyToAuthor != null) {
-                                        Text(
-                                            text = "En respuesta a ${c.replyToAuthor}",
-                                            style = Texto12Regular.copy(color = CaMuted),
-                                            modifier = Modifier.padding(start = 12.dp)
-                                        )
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                    }
-                                    CommentCardItem(
-                                        author = c.author,
-                                        timestamp = c.timestamp,
-                                        content = when {
-                                            c.isHiddenByModeration -> "Ocultado por moderación"
-                                            c.isDeleted -> "Comentario eliminado"
-                                            else -> c.content
-                                        },
-                                        isOfficial = c.isOfficial,
-                                        isMutedText = c.isHiddenByModeration || c.isDeleted,
-                                        modifier = if (c.replyToAuthor != null) Modifier.padding(start = 12.dp) else Modifier
-                                    )
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                }
-                            } else {
-                                CommentCardItem(
-                                    author = "María G.",
-                                    timestamp = "20 oct. 2026 · 8:20 a. m.",
-                                    content = "El hueco es peligroso para las bicicletas.",
-                                    isOfficial = false
-                                )
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Text(
-                                    text = "Responder",
-                                    style = Texto12Semibold.copy(color = CaPrimaryText)
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = "En respuesta a María G.",
+                                    text = "En respuesta a ${c.replyToAuthor}",
                                     style = Texto12Regular.copy(color = CaMuted),
                                     modifier = Modifier.padding(start = 12.dp)
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
-                                CommentCardItem(
-                                    author = "Laura P. · Gestora",
-                                    timestamp = "20 oct. 2026 · 10:35 a. m.",
-                                    content = "Gracias, María. Ya verificamos la ubicación.",
-                                    isOfficial = true,
-                                    modifier = Modifier.padding(start = 12.dp)
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                CommentCardItem(
-                                    author = "Andrés M.",
-                                    timestamp = "21 oct. 2026 · 7:40 a. m.",
-                                    content = "Gracias por revisar el tramo.",
-                                    isOfficial = false
-                                )
                             }
+                            CommentCardItem(
+                                author = c.author,
+                                timestamp = c.timestamp,
+                                content = when {
+                                    c.isHiddenByModeration -> "Ocultado por moderación"
+                                    c.isDeleted -> "Comentario eliminado"
+                                    else -> c.content
+                                },
+                                isOfficial = c.isOfficial,
+                                isMutedText = c.isHiddenByModeration || c.isDeleted,
+                                modifier = if (c.replyToAuthor != null) Modifier.padding(start = 12.dp) else Modifier
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                        }
+                    } else {
+                        Surface(
+                            color = CaWhite,
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, CaBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Aún no hay comentarios en este reporte.",
+                                style = Texto14Regular.copy(color = CaMuted),
+                                modifier = Modifier.padding(16.dp)
+                            )
                         }
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    if (commentMode == "Límite") {
-                        Surface(
-                            color = WarningBannerBg,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                text = "Alcanzaste el límite de comentarios por hora. Intenta más tarde.",
-                                style = Texto12Semibold.copy(color = StatusEnAtencionText),
-                                modifier = Modifier.padding(14.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                    }
-
-                    if (commentMode != "Solo lectura" && currentStatus != ReportStatus.CONFIRMADO) {
+                    if (currentStatus != ReportStatus.CONFIRMADO) {
                         Text(text = "Participa en la conversación", style = Titulo16)
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(

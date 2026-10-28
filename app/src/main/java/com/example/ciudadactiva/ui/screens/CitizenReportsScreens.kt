@@ -55,15 +55,17 @@ fun CitizenReportsScreen(navController: NavController) {
     var selectedCategoryFilter by remember { mutableStateOf<String?>(null) }
     var selectedStatusFilter by remember { mutableStateOf<ReportStatus?>(null) }
     var selectedPriorityFilter by remember { mutableStateOf<ReportPriority?>(null) }
-    var uiState by remember { mutableStateOf("Normal") } // Normal, Cargando, Vacío, Sin resultados, Error
+    var isLoading by remember { mutableStateOf(CiudadActivaRepository.reports.isEmpty()) }
 
     val currentRole = CiudadActivaRepository.currentRole
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
+        if (CiudadActivaRepository.reports.isEmpty()) isLoading = true
         CiudadActivaRepository.refreshCategories()
         CiudadActivaRepository.refreshAllReportsForCurrentRole()
         CiudadActivaRepository.refreshNotifications()
+        isLoading = false
     }
 
     if (showFilterSheet) {
@@ -274,38 +276,17 @@ fun CitizenReportsScreen(navController: NavController) {
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Quick state selector so user can inspect Cargando, Vacío, Sin resultados, Error de red
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf("Normal", "Cargando", "Vacío", "Sin resultados", "Error").forEach { mode ->
-                    val selected = uiState == mode
-                    Surface(
-                        color = if (selected) StatusAdmitidoBg else CaWhite,
-                        shape = RoundedCornerShape(999.dp),
-                        border = BorderStroke(1.dp, if (selected) CaPrimaryText else CaBorder),
-                        modifier = Modifier.clickable { uiState = mode }
-                    ) {
-                        Text(
-                            text = mode,
-                            style = Texto12Semibold.copy(
-                                color = if (selected) StatusAdmitidoText else CaMuted
-                            ),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
-                    }
-                }
-            }
-
             Spacer(modifier = Modifier.height(14.dp))
 
-            when (uiState) {
-                "Cargando" -> {
+            val hasActiveFilters = selectedCategoryFilter != null || selectedStatusFilter != null || selectedPriorityFilter != null
+            val filteredReports = CiudadActivaRepository.reports.filter { rep ->
+                (selectedCategoryFilter == null || rep.category.contains(selectedCategoryFilter!!, ignoreCase = true)) &&
+                    (selectedStatusFilter == null || rep.status == selectedStatusFilter) &&
+                    (selectedPriorityFilter == null || rep.priority == selectedPriorityFilter)
+            }
+
+            when {
+                isLoading && CiudadActivaRepository.reports.isEmpty() -> {
                     Text(
                         text = "Cargando reportes...",
                         style = Texto12Regular.copy(color = CaMuted)
@@ -316,7 +297,7 @@ fun CitizenReportsScreen(navController: NavController) {
                         Spacer(modifier = Modifier.height(12.dp))
                     }
                 }
-                "Vacío" -> {
+                CiudadActivaRepository.reports.isEmpty() -> {
                     Spacer(modifier = Modifier.height(32.dp))
                     CaEmptyStateCard(
                         title = "Aún no hay reportes",
@@ -325,7 +306,7 @@ fun CitizenReportsScreen(navController: NavController) {
                         onCtaClick = { navController.navigate(Screen.CreateReport.route) }
                     )
                 }
-                "Sin resultados" -> {
+                filteredReports.isEmpty() && hasActiveFilters -> {
                     Spacer(modifier = Modifier.height(32.dp))
                     CaEmptyStateCard(
                         title = "No encontramos reportes",
@@ -335,30 +316,10 @@ fun CitizenReportsScreen(navController: NavController) {
                             selectedCategoryFilter = null
                             selectedStatusFilter = null
                             selectedPriorityFilter = null
-                            uiState = "Normal"
-                        }
-                    )
-                }
-                "Error" -> {
-                    Spacer(modifier = Modifier.height(32.dp))
-                    CaErrorStateCard(
-                        title = "No pudimos cargar los reportes",
-                        subtitle = "Revisa tu conexión a internet e intenta de nuevo.",
-                        onRetry = {
-                            uiState = "Normal"
-                            scope.launch {
-                                CiudadActivaRepository.refreshAllReportsForCurrentRole()
-                            }
                         }
                     )
                 }
                 else -> {
-                    val filteredReports = CiudadActivaRepository.reports.filter { rep ->
-                        (selectedCategoryFilter == null || rep.category.contains(selectedCategoryFilter!!, ignoreCase = true)) &&
-                            (selectedStatusFilter == null || rep.status == selectedStatusFilter) &&
-                            (selectedPriorityFilter == null || rep.priority == selectedPriorityFilter)
-                    }
-
                     if (isMapView) {
                         // `Reportes · Vista mapa` - Mapa real de Colombia con todos los reportes
                         var selectedMapReportId by remember {
@@ -469,13 +430,15 @@ fun CitizenReportsScreen(navController: NavController) {
 @Composable
 fun MyReportsScreen(navController: NavController) {
     var selectedFilter by remember { mutableStateOf("Todos") }
-    var uiState by remember { mutableStateOf("Normal") } // Normal, Vacío, Cargando, Error
+    var isLoading by remember { mutableStateOf(CiudadActivaRepository.reports.none { it.isOwnReport }) }
     var reportToCancel by remember { mutableStateOf<ReportItem?>(null) }
     var cancelSuccessSnackbar by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
+        if (CiudadActivaRepository.reports.none { it.isOwnReport }) isLoading = true
         CiudadActivaRepository.refreshAllReportsForCurrentRole()
+        isLoading = false
     }
 
     if (reportToCancel != null) {
@@ -546,32 +509,6 @@ fun MyReportsScreen(navController: NavController) {
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Quick state switcher for Mis reportes (Normal, Vacío, Cargando, Error)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf("Normal", "Vacío", "Cargando", "Error").forEach { mode ->
-                    val selected = uiState == mode
-                    Surface(
-                        color = if (selected) StatusAdmitidoBg else CaWhite,
-                        shape = RoundedCornerShape(999.dp),
-                        border = BorderStroke(1.dp, if (selected) CaPrimaryText else CaBorder),
-                        modifier = Modifier.clickable { uiState = mode }
-                    ) {
-                        Text(
-                            text = mode,
-                            style = Texto12Semibold.copy(
-                                color = if (selected) StatusAdmitidoText else CaMuted
-                            ),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
-                    }
-                }
-            }
-
             Spacer(modifier = Modifier.height(14.dp))
 
             if (cancelSuccessSnackbar) {
@@ -582,17 +519,18 @@ fun MyReportsScreen(navController: NavController) {
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
-            when (uiState) {
-                "Vacío" -> {
-                    Spacer(modifier = Modifier.height(40.dp))
-                    CaEmptyStateCard(
-                        title = "Todavía no has reportado nada",
-                        subtitle = "Ayúdanos a mejorar tu barrio. Crea tu primer reporte y sigue su estado aquí.",
-                        ctaText = "Crear reporte",
-                        onCtaClick = { navController.navigate(Screen.CreateReport.route) }
-                    )
+            val allOwnReports = CiudadActivaRepository.reports.filter { it.isOwnReport }
+            val myReports = allOwnReports.filter { rep ->
+                when (selectedFilter) {
+                    "Registrado" -> rep.status == ReportStatus.REGISTRADO
+                    "Admitido" -> rep.status == ReportStatus.ADMITIDO
+                    "En atención" -> rep.status == ReportStatus.EN_ATENCION
+                    else -> true
                 }
-                "Cargando" -> {
+            }
+
+            when {
+                isLoading && allOwnReports.isEmpty() -> {
                     Text(
                         text = "Cargando tus reportes...",
                         style = Texto12Regular.copy(color = CaMuted)
@@ -603,28 +541,25 @@ fun MyReportsScreen(navController: NavController) {
                         Spacer(modifier = Modifier.height(12.dp))
                     }
                 }
-                "Error" -> {
+                allOwnReports.isEmpty() -> {
                     Spacer(modifier = Modifier.height(40.dp))
-                    CaErrorStateCard(
-                        title = "No pudimos cargar tus reportes",
-                        subtitle = "Revisa tu conexión e inténtalo de nuevo.",
-                        onRetry = {
-                            uiState = "Normal"
-                            scope.launch {
-                                CiudadActivaRepository.refreshAllReportsForCurrentRole()
-                            }
-                        }
+                    CaEmptyStateCard(
+                        title = "Todavía no has reportado nada",
+                        subtitle = "Ayúdanos a mejorar tu barrio. Crea tu primer reporte y sigue su estado aquí.",
+                        ctaText = "Crear reporte",
+                        onCtaClick = { navController.navigate(Screen.CreateReport.route) }
+                    )
+                }
+                myReports.isEmpty() -> {
+                    Spacer(modifier = Modifier.height(40.dp))
+                    CaEmptyStateCard(
+                        title = "No tienes reportes en este estado",
+                        subtitle = "Prueba seleccionando otro filtro para ver tus demás reportes.",
+                        ctaText = "Ver todos",
+                        onCtaClick = { selectedFilter = "Todos" }
                     )
                 }
                 else -> {
-                    val myReports = CiudadActivaRepository.reports.filter { rep ->
-                        rep.isOwnReport && when (selectedFilter) {
-                            "Registrado" -> rep.status == ReportStatus.REGISTRADO
-                            "Admitido" -> rep.status == ReportStatus.ADMITIDO
-                            "En atención" -> rep.status == ReportStatus.EN_ATENCION
-                            else -> true
-                        }
-                    }
                     Text(
                         text = "${myReports.size} reportes · Más recientes primero",
                         style = Texto12Regular.copy(color = CaMuted)
@@ -1138,12 +1073,14 @@ fun CreateOrEditReportScreen(
 // =========================================================================
 @Composable
 fun NotificationsScreen(navController: NavController) {
-    var uiState by remember { mutableStateOf("Lista") } // Lista, Vacío, Cargando, Error
+    var isLoading by remember { mutableStateOf(CiudadActivaRepository.notifications.isEmpty()) }
     val currentRole = CiudadActivaRepository.currentRole
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
+        if (CiudadActivaRepository.notifications.isEmpty()) isLoading = true
         CiudadActivaRepository.refreshNotifications()
+        isLoading = false
     }
 
     Scaffold(
@@ -1171,57 +1108,18 @@ fun NotificationsScreen(navController: NavController) {
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
-            // Mode Switcher for Avisos states (`Lista`, `Vacío`, `Cargando`, `Error`)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf("Lista", "Vacío", "Cargando", "Error").forEach { mode ->
-                    val selected = uiState == mode
-                    Surface(
-                        color = if (selected) StatusAdmitidoBg else CaWhite,
-                        shape = RoundedCornerShape(999.dp),
-                        border = BorderStroke(1.dp, if (selected) CaPrimaryText else CaBorder),
-                        modifier = Modifier.clickable { uiState = mode }
-                    ) {
-                        Text(
-                            text = mode,
-                            style = Texto12Semibold.copy(
-                                color = if (selected) StatusAdmitidoText else CaMuted
-                            ),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            when (uiState) {
-                "Vacío" -> {
-                    Spacer(modifier = Modifier.height(40.dp))
-                    CaEmptyStateCard(
-                        title = "No tienes avisos",
-                        subtitle = "Te avisaremos aquí cuando haya cambios o respuestas en tus reportes."
-                    )
-                }
-                "Cargando" -> {
+            when {
+                isLoading && CiudadActivaRepository.notifications.isEmpty() -> {
                     repeat(3) {
                         CaSkeletonCard()
                         Spacer(modifier = Modifier.height(12.dp))
                     }
                 }
-                "Error" -> {
+                CiudadActivaRepository.notifications.isEmpty() -> {
                     Spacer(modifier = Modifier.height(40.dp))
-                    CaErrorStateCard(
-                        title = "No pudimos cargar tus avisos",
-                        subtitle = "Revisa tu conexión a internet e intenta de nuevo.",
-                        onRetry = {
-                            uiState = "Lista"
-                            scope.launch {
-                                CiudadActivaRepository.refreshNotifications()
-                            }
-                        }
+                    CaEmptyStateCard(
+                        title = "No tienes avisos",
+                        subtitle = "Te avisaremos aquí cuando haya cambios o respuestas en tus reportes."
                     )
                 }
                 else -> {
